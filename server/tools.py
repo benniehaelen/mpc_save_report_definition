@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import re
 
-from server import call_log, compiler, intent_catalog, parity, registry
+from server import (
+    call_log,
+    compiler,
+    intent_catalog,
+    knowledge_graph,
+    parity,
+    registry,
+)
 from server.db import ANCHOR_DATE, get_connection
 
 _ROW_CAP = 500
@@ -125,6 +132,7 @@ def save_report_definition(
     """Distill a definition, run the parity gate, and register on pass."""
     con = get_connection()
     log_rows = call_log.fetch(con, conversation_id)
+    catalog = knowledge_graph.load_catalog(con)
 
     definition: dict = {}
     parity_result = {"passed": False, "diff_summary": "no attempt made"}
@@ -137,12 +145,21 @@ def save_report_definition(
             final_artifact=final_artifact,
             log_rows=log_rows,
             anchor_date=ANCHOR_DATE,
+            catalog=catalog,
             temporal_confirmations=temporal_confirmations,
             attempt=attempt,
         )
         parity_result = parity.check(con, definition, final_artifact, ANCHOR_DATE)
         if parity_result["passed"]:
             break
+
+    # Validate the distilled metric bindings against the knowledge graph.
+    binding_errors = knowledge_graph.validate_bindings(
+        catalog, definition.get("metric_bindings", [])
+    )
+    definition["warnings"] = definition.get("warnings", []) + [
+        f"binding validation: {err}" for err in binding_errors
+    ]
 
     parity_block = {
         "passed": parity_result["passed"],

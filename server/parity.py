@@ -14,7 +14,7 @@ import re
 import duckdb
 
 from runner import render
-from server import temporal
+from server import reasoning, temporal
 
 _TABLE_RE = re.compile(
     r'<table\b[^>]*\bdata-result="([^"]+)"[^>]*>(.*?)</table>',
@@ -87,9 +87,12 @@ def check(
     """Return {passed, diff_summary}. as_of_date should be the anchor for save."""
     results_by_name = {
         q["result_name"]: run_named_query(con, q["sql"], as_of_date)
-        for q in definition["queries"]
+        for q in definition["parameterized_sql"]
     }
-    rendered = render.render_definition(definition, results_by_name)
+    narratives = reasoning.get_engine().run(
+        definition.get("reasoning_steps", []), results_by_name
+    )
+    rendered = render.render_html(definition, results_by_name, narratives)
     original = final_artifact.get("content", "")
 
     exp_tables = _extract_tables(original)

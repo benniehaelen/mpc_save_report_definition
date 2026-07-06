@@ -63,11 +63,16 @@ def main() -> None:
             "overall_occupancy", "occupancy_rate", ovr["rows"][0]["occupancy_rate"]
         )
         + "</p>"
+        # A reasoning placeholder the runner fills over fresh results at replay.
+        + render.build_reasoning_para(
+            "occ_summary", "census_by_facility", "occupancy_rate", "max"
+        )
     )
     artifact = {
         "format": "html",
         "title": "Division Admissions and Census",
         "content": content,
+        "formats": ["html", "md"],
     }
 
     # Step 7: save.

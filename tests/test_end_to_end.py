@@ -1,14 +1,15 @@
 """End-to-end test: a scripted session against the tools in-process (no MCP
 transport), then regeneration as of a different date.
 
-Proves: dead-end queries drop out, stored SQL is tokenized, the report registers,
-and regenerating as of a different date keeps the structure but changes the data.
+Proves: dead-end queries drop out, stored SQL is tokenized, metric bindings and
+reasoning steps are distilled, the report registers, and regenerating as of a
+different date keeps the structure but changes both the data and the narrative.
 """
 
 from __future__ import annotations
 
 from runner import render
-from server import call_log, parity, registry, tools
+from server import parity, reasoning, registry, tools
 from server.db import ANCHOR_DATE, get_connection
 
 CID = "e2e-session"
@@ -34,7 +35,6 @@ _OVERALL = (
 
 
 def _run_session():
-    # A throwaway query that is never referenced by the artifact.
     tools.execute_sql(CID, "SELECT COUNT(*) AS n FROM admissions", "scratch")
     adm = tools.execute_sql(CID, _ADMISSIONS, "admissions_by_division")
     cen = tools.execute_sql(CID, _CENSUS, "census_by_facility")
@@ -45,16 +45,22 @@ def _run_session():
         + render.build_table_html(
             "admissions_by_division", adm["columns"], adm["rows"]
         )
-        + render.build_table_html(
-            "census_by_facility", cen["columns"], cen["rows"]
-        )
+        + render.build_table_html("census_by_facility", cen["columns"], cen["rows"])
         + "<p class='headline'>Occupancy: "
         + render.build_value_span(
             "overall_occupancy", "occupancy_rate", ovr["rows"][0]["occupancy_rate"]
         )
         + "</p>"
+        + render.build_reasoning_para(
+            "occ_summary", "census_by_facility", "occupancy_rate", "max"
+        )
     )
-    return {"format": "html", "title": "Division Admissions and Census", "content": content}
+    return {
+        "format": "html",
+        "title": "Division Admissions and Census",
+        "content": content,
+        "formats": ["html", "md"],
+    }
 
 
 def test_end_to_end_save_and_regenerate():
@@ -74,7 +80,7 @@ def test_end_to_end_save_and_regenerate():
     definition = registry.get(con, report_id)
 
     # Dead-end query dropped out.
-    names = [q["result_name"] for q in definition["queries"]]
+    names = [q["result_name"] for q in definition["parameterized_sql"]]
     assert "scratch" not in names
     assert set(names) == {
         "admissions_by_division",
@@ -83,33 +89,48 @@ def test_end_to_end_save_and_regenerate():
     }
 
     # Stored SQL is tokenized, not literal.
-    for query in definition["queries"]:
+    for query in definition["parameterized_sql"]:
         assert "__REPORT_DATE__" in query["sql"]
         assert "DATE '2025-06-01'" not in query["sql"]
 
-    # Registered and listable.
-    assert any(r["report_id"] == report_id for r in registry.list_all(con))
+    # Metric bindings were distilled and validated (no binding warnings).
+    metrics = {b["metric_id"] for b in definition["metric_bindings"] if b["metric_id"]}
+    value_sets = {b["value_set"] for b in definition["metric_bindings"] if b["value_set"]}
+    assert "occupancy_rate" in metrics
+    assert "admissions" in metrics
+    assert "divisions" in value_sets
+    assert not any("binding validation" in w for w in definition["warnings"])
 
-    # Regenerate at the anchor: values match the original session.
-    at_anchor = {
-        q["result_name"]: parity.run_named_query(con, q["sql"], ANCHOR_DATE)
-        for q in definition["queries"]
-    }
-    anchor_html = render.render_definition(definition, at_anchor)
-    anchor_tables = parity._extract_tables(anchor_html)
-    original_tables = parity._extract_tables(artifact["content"])
-    assert anchor_tables == original_tables
+    # Reasoning steps were distilled.
+    step_ids = {s["step_id"] for s in definition["reasoning_steps"]}
+    assert step_ids == {"occ_summary"}
+    assert definition["rendering_spec"]["formats"] == ["html", "md"]
 
-    # Regenerate as of a different date: same structure, different data.
-    as_of = "2025-05-15"
-    at_other = {
-        q["result_name"]: parity.run_named_query(con, q["sql"], as_of)
-        for q in definition["queries"]
-    }
-    other_html = render.render_definition(definition, at_other)
-    other_tables = parity._extract_tables(other_html)
+    engine = reasoning.get_engine()
 
-    assert set(other_tables) == set(anchor_tables)  # structure preserved
+    def _render(as_of: str):
+        results = {
+            q["result_name"]: parity.run_named_query(con, q["sql"], as_of)
+            for q in definition["parameterized_sql"]
+        }
+        narratives = engine.run(definition["reasoning_steps"], results)
+        html = render.render_html(definition, results, narratives)
+        md = render.render_markdown(definition, results, narratives)
+        return parity._extract_tables(html), narratives, md
+
+    anchor_tables, anchor_narr, anchor_md = _render(ANCHOR_DATE)
+    other_tables, other_narr, _ = _render("2025-05-15")
+
+    # Regenerating at the anchor reproduces the original data.
+    assert anchor_tables == parity._extract_tables(artifact["content"])
+
+    # A different date keeps the structure but changes data and narrative.
+    assert set(other_tables) == set(anchor_tables)
     assert other_tables["admissions_by_division"] != anchor_tables[
         "admissions_by_division"
-    ]  # data changed
+    ]
+    assert other_narr["occ_summary"] != anchor_narr["occ_summary"]
+
+    # Markdown comes from the same rendering spec.
+    assert anchor_md.startswith("# Division Admissions and Census")
+    assert "| division | admissions |" in anchor_md

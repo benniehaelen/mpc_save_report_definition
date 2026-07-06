@@ -93,6 +93,43 @@ def _drop_and_create(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
 
+    # The local "knowledge graph": governed metrics and their ValueSets, plus
+    # the mapping from a dimension column to the ValueSet that governs it.
+    con.execute(
+        """
+        CREATE TABLE metrics (
+          metric_id    VARCHAR PRIMARY KEY,
+          display_name VARCHAR,
+          unit         VARCHAR,
+          description  VARCHAR
+        )
+        """
+    )
+    con.execute(
+        "CREATE TABLE value_sets (value_set VARCHAR, code VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE dimension_value_sets (dimension VARCHAR, value_set VARCHAR)"
+    )
+
+
+def _catalog_rows():
+    metrics = [
+        ("admissions", "Admissions", "count", "Count of admissions"),
+        ("avg_los", "Average length of stay", "days", "Mean length of stay"),
+        ("avg_census", "Average midnight census", "count", "Mean midnight census"),
+        ("occupancy_rate", "Occupancy rate", "ratio", "Census over bed count"),
+    ]
+    value_sets = (
+        [("divisions", d) for d in DIVISIONS]
+        + [("service_lines", s) for s in SERVICE_LINES]
+    )
+    dimension_value_sets = [
+        ("division", "divisions"),
+        ("service_line", "service_lines"),
+    ]
+    return metrics, value_sets, dimension_value_sets
+
 
 def _build_rows(rng: random.Random):
     facilities = []
@@ -137,10 +174,20 @@ def main() -> None:
         con.executemany("INSERT INTO facilities VALUES (?, ?, ?, ?)", facilities)
         con.executemany("INSERT INTO admissions VALUES (?, ?, ?, ?, ?)", admissions)
         con.executemany("INSERT INTO daily_census VALUES (?, ?, ?)", census)
+
+        metrics, value_sets, dimension_value_sets = _catalog_rows()
+        con.executemany("INSERT INTO metrics VALUES (?, ?, ?, ?)", metrics)
+        con.executemany("INSERT INTO value_sets VALUES (?, ?)", value_sets)
+        con.executemany(
+            "INSERT INTO dimension_value_sets VALUES (?, ?)", dimension_value_sets
+        )
+
         print(f"Seeded {DB_PATH}")
         print(f"  facilities:   {len(facilities)}")
         print(f"  admissions:   {len(admissions)}")
         print(f"  daily_census: {len(census)}")
+        print(f"  metrics:      {len(metrics)}")
+        print(f"  value_sets:   {len(value_sets)} memberships")
         print(f"  anchor date:  {ANCHOR_DATE.isoformat()}")
     finally:
         con.close()

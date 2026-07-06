@@ -10,5 +10,6 @@ venv/
 data/poc.duckdb
 data/poc.duckdb.wal
 
-# Generated reports
+# Generated reports and local observability
 reports/
+logs/

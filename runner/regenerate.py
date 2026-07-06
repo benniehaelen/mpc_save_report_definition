@@ -1,11 +1,13 @@
 """CLI replay runner: the Cloud Run stand-in.
 
     python runner/regenerate.py --report-id <id> [--version N] [--as-of 2025-06-15]
-                                [--out reports/]
+                                [--out reports/] [--formats html,md]
     python runner/regenerate.py --list
 
-Fetches a definition, binds the report-date token to --as-of, executes the named
-queries, renders the template, and writes an HTML file.
+Fetches a definition, validates its bindings against the knowledge graph, binds
+the report-date token to --as-of, executes the named queries, runs the reasoning
+steps over the fresh results, renders every requested format, and writes the
+outputs. Each step is recorded as a local observability span.
 """
 
 from __future__ import annotations
@@ -17,9 +19,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from runner import render  # noqa: E402
-from server import registry  # noqa: E402
+from server import knowledge_graph, reasoning, registry  # noqa: E402
 from server.db import ANCHOR_DATE, PROJECT_ROOT, get_connection  # noqa: E402
+from server.observability import RunRecorder  # noqa: E402
 from server.parity import run_named_query  # noqa: E402
+
+_EXTENSIONS = {"html": "html", "md": "md"}
 
 
 def _list_reports(con) -> None:
@@ -40,24 +45,65 @@ def regenerate(
     version: int | None,
     as_of: str,
     out_dir: Path,
-) -> Path:
+    formats: list[str] | None = None,
+) -> list[Path]:
     con = get_connection(read_only=True)
-    definition = registry.get(con, report_id, version)
-    resolved_version = definition["definition_version"]
+    recorder = RunRecorder(report_id, version or 0, as_of)
 
-    results_by_name = {}
-    for query in definition["queries"]:
+    with recorder.span("fetch_definition"):
+        definition = registry.get(con, report_id, version)
+    resolved_version = definition["definition_version"]
+    recorder.version = resolved_version
+
+    # Fetch definition, validate bindings.
+    catalog = knowledge_graph.load_catalog(con)
+    with recorder.span("validate_bindings") as span:
+        errors = knowledge_graph.validate_bindings(
+            catalog, definition.get("metric_bindings", [])
+        )
+        span.set(bindings=len(definition.get("metric_bindings", [])), errors=len(errors))
+    if errors:
+        for err in errors:
+            print(f"  binding error: {err}")
+        raise SystemExit(f"Binding validation failed for {report_id}")
+
+    # Direct execution of each named query with the report date bound.
+    results_by_name: dict[str, dict] = {}
+    for query in definition["parameterized_sql"]:
         name = query["result_name"]
-        result = run_named_query(con, query["sql"], as_of)
+        with recorder.span(f"execute:{name}") as span:
+            result = run_named_query(con, query["sql"], as_of)
+            span.set(rows=len(result["rows"]))
         results_by_name[name] = result
         print(f"  query {name}: {len(result['rows'])} rows")
 
-    html = render.render_definition(definition, results_by_name)
+    # Run reasoning steps over the fresh results.
+    with recorder.span("reasoning") as span:
+        narratives = reasoning.get_engine().run(
+            definition.get("reasoning_steps", []), results_by_name
+        )
+        span.set(steps=len(narratives))
+    for step_id, text in narratives.items():
+        print(f"  reasoning {step_id}: {text}")
+
+    # Render and deliver every requested format.
+    requested = formats or definition["rendering_spec"].get("formats", ["html"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{report_id}_v{resolved_version}_{as_of}.html"
-    out_path.write_text(html, encoding="utf-8")
-    print(f"Wrote {out_path}")
-    return out_path
+    outputs: list[Path] = []
+    for fmt in requested:
+        if fmt not in _EXTENSIONS:
+            print(f"  skipping unsupported format '{fmt}'")
+            continue
+        with recorder.span(f"render:{fmt}"):
+            content = render.render(definition, results_by_name, narratives, fmt)
+        out_path = out_dir / f"{report_id}_v{resolved_version}_{as_of}.{_EXTENSIONS[fmt]}"
+        out_path.write_text(content, encoding="utf-8")
+        outputs.append(out_path)
+        print(f"  wrote {out_path}")
+
+    log_path = recorder.flush([str(p) for p in outputs])
+    print(f"  spans: {len(recorder.spans)} recorded to {log_path}")
+    return outputs
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -66,6 +112,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--version", type=int, default=None)
     parser.add_argument("--as-of", default=ANCHOR_DATE)
     parser.add_argument("--out", default=str(PROJECT_ROOT / "reports"))
+    parser.add_argument(
+        "--formats", default=None, help="Comma-separated override, e.g. html,md"
+    )
     parser.add_argument("--list", action="store_true", help="List registered reports.")
     args = parser.parse_args(argv)
 
@@ -75,7 +124,8 @@ def main(argv: list[str] | None = None) -> None:
         return
     if not args.report_id:
         parser.error("--report-id is required unless --list is given")
-    regenerate(args.report_id, args.version, args.as_of, Path(args.out))
+    formats = args.formats.split(",") if args.formats else None
+    regenerate(args.report_id, args.version, args.as_of, Path(args.out), formats)
 
 
 if __name__ == "__main__":
