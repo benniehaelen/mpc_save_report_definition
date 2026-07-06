@@ -160,7 +160,25 @@ runner/regenerate.py          validate bindings, bind __REPORT_DATE__ to --as-of
 The compiler is a deterministic heuristic behind a `Distiller` protocol, and the
 reasoning engine is a deterministic implementation behind a `ReasoningEngine`
 protocol. Either can be swapped for an LLM-backed version without touching the
-rest of the system, and the core path stays LLM-free and offline.
+rest of the system, and the default core path stays LLM-free and offline.
+
+### Optional LLM-backed reasoning
+
+An `AnthropicReasoningEngine` (the design's LLM service) is wired behind the same
+`ReasoningEngine` protocol. It is opt-in and off by default:
+
+```
+pip install -e ".[llm]"          # installs the anthropic SDK
+set POC_REASONING=anthropic       # Windows; use export on macOS/Linux
+# authenticate the SDK (ANTHROPIC_API_KEY or `ant auth login`)
+python runner/regenerate.py --report-id <id> --as-of 2025-05-15
+```
+
+It uses `claude-opus-4-8` (override with `POC_REASONING_MODEL`) with adaptive
+thinking to write one grounded sentence per reasoning step over the fresh
+results. On any failure (no SDK, no credentials, network, empty response) it
+falls back to the deterministic engine per step, so a replay never breaks. The
+parity gate is unaffected either way, since narrative carries no `data-value`.
 
 ## Temporal re-parameterization
 

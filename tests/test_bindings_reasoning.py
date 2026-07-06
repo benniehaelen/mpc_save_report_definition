@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from server import knowledge_graph, reasoning
 from server.db import get_connection
 
@@ -68,3 +70,23 @@ def test_reasoning_handles_empty_result():
     steps = [{"step_id": "x", "result_name": "t", "field": "val", "agg": "max"}]
     empty = {"t": {"columns": ["label", "val"], "rows": []}}
     assert engine.run(steps, empty)["x"] == "No data available for this period."
+
+
+def test_get_engine_defaults_to_heuristic(monkeypatch):
+    monkeypatch.delenv("POC_REASONING", raising=False)
+    assert isinstance(reasoning.get_engine(), reasoning.HeuristicReasoningEngine)
+
+
+def test_get_engine_opts_into_llm(monkeypatch):
+    monkeypatch.setenv("POC_REASONING", "anthropic")
+    assert isinstance(reasoning.get_engine(), reasoning.AnthropicReasoningEngine)
+
+
+def test_llm_engine_falls_back_without_sdk(monkeypatch):
+    # Force `import anthropic` to fail so no network call is attempted; the LLM
+    # engine must then produce the same output as the heuristic.
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    steps = [{"step_id": "hi", "result_name": "t", "field": "val", "agg": "max"}]
+    llm = reasoning.AnthropicReasoningEngine()
+    heuristic = reasoning.HeuristicReasoningEngine()
+    assert llm.run(steps, _RESULTS) == heuristic.run(steps, _RESULTS)

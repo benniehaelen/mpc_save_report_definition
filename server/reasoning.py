@@ -14,7 +14,12 @@ whatever data the replay produced, the narrative changes with the report date.
 
 from __future__ import annotations
 
+import os
 from typing import Protocol
+
+# Model used by the optional LLM engine. Overridable, defaults to Opus 4.8.
+_LLM_MODEL = os.environ.get("POC_REASONING_MODEL", "claude-opus-4-8")
+_MAX_TABLE_ROWS = 50
 
 
 class ReasoningEngine(Protocol):
@@ -78,6 +83,82 @@ class HeuristicReasoningEngine:
         )
 
 
+class AnthropicReasoningEngine:
+    """Optional LLM-backed engine behind the same protocol.
+
+    This is the design's LLM service, wired in without touching the runner or the
+    parity gate. It is opt-in (see get_engine) and never used by the tests or the
+    default core path. Any failure (no SDK, no credentials, network, empty
+    response) falls back to the deterministic engine, so a replay never breaks.
+    """
+
+    def __init__(self, model: str = _LLM_MODEL) -> None:
+        self._model = model
+        self._fallback = HeuristicReasoningEngine()
+
+    _SYSTEM = (
+        "You write a single concise sentence of insight about a SQL query "
+        "result. No preamble, exactly one sentence, grounded in the numbers."
+    )
+
+    def run(
+        self, steps: list[dict], results_by_name: dict[str, dict]
+    ) -> dict[str, str]:
+        if not steps:
+            return {}
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic()
+        except Exception:  # noqa: BLE001 - no SDK or no credentials
+            return self._fallback.run(steps, results_by_name)
+
+        narratives: dict[str, str] = {}
+        for step in steps:
+            try:
+                narratives[step["step_id"]] = self._one(client, step, results_by_name)
+            except Exception:  # noqa: BLE001 - fall back per step on any error
+                narratives[step["step_id"]] = self._fallback._one(
+                    step, results_by_name
+                )
+        return narratives
+
+    def _one(self, client, step: dict, results_by_name: dict[str, dict]) -> str:
+        result = results_by_name.get(step["result_name"])
+        if not result or not result["rows"]:
+            return self._fallback._one(step, results_by_name)
+        columns = result["columns"]
+        rows = result["rows"][:_MAX_TABLE_ROWS]
+        table = "\n".join(
+            [" | ".join(columns)]
+            + [" | ".join(str(row[c]) for c in columns) for row in rows]
+        )
+        user = (
+            f"Result '{step['result_name']}' "
+            f"(aggregate of interest: {step['agg']} of {step['field']}):\n"
+            f"{table}\n\nWrite one concise sentence of insight."
+        )
+        response = client.messages.create(
+            model=self._model,
+            max_tokens=300,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "low"},
+            system=self._SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = next((b.text for b in response.content if b.type == "text"), "").strip()
+        return text or self._fallback._one(step, results_by_name)
+
+
 def get_engine() -> ReasoningEngine:
-    """Return the reasoning engine for the core path (deterministic by default)."""
+    """Return the reasoning engine.
+
+    Deterministic by default so the core path stays LLM-free and offline. Set
+    POC_REASONING=anthropic (and install the 'llm' extra plus configure Anthropic
+    credentials) to opt into the LLM-backed engine, which falls back to the
+    heuristic on any error.
+    """
+    mode = os.environ.get("POC_REASONING", "heuristic").lower()
+    if mode in ("anthropic", "llm", "claude"):
+        return AnthropicReasoningEngine()
     return HeuristicReasoningEngine()

@@ -11,6 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Optional LLM-backed reasoning engine (opt-in via POC_REASONING=anthropic).
+llm = ["anthropic>=0.69"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
