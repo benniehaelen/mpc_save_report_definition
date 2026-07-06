@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Local database (recreated by data/seed.py)
+data/poc.duckdb
+data/poc.duckdb.wal
+
+# Generated reports
+reports/
