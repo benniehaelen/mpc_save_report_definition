@@ -17,6 +17,12 @@ from __future__ import annotations
 import os
 from typing import Protocol
 
+from server.env import load_dotenv
+
+# Load a local .env (if present) so ANTHROPIC_API_KEY / POC_REASONING can be set
+# there. A no-op when no .env exists, so the default offline path is unchanged.
+load_dotenv()
+
 # Model used by the optional LLM engine. Overridable, defaults to Opus 4.8.
 _LLM_MODEL = os.environ.get("POC_REASONING_MODEL", "claude-opus-4-8")
 _MAX_TABLE_ROWS = 50

@@ -86,6 +86,68 @@ Every tool takes `conversation_id` as its first argument (an opaque session key)
   the logged calls, runs the parity gate against the final artifact, and
   registers the definition on pass.
 
+## Copilot session (capture path), step by step
+
+The capture path is interactive: a Copilot client (Claude Code, GitHub Copilot in
+VS Code, or any MCP-capable assistant) drives the four tools to build a report,
+then saves it once. The replay path is then fully automated.
+
+### 1. Connect the MCP server to your Copilot client
+
+Seed the database first (`python data/seed.py`). The server speaks MCP over
+stdio. For GitHub Copilot in VS Code, add `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "hin-poc": {
+      "type": "stdio",
+      "command": "C:\\src\\mpc_save_report_definition\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\src\\mpc_save_report_definition\\server\\main.py"]
+    }
+  }
+}
+```
+
+For Claude Code, use the `mcpServers` form shown under "Running the MCP server"
+above. Start a fresh chat and confirm the four `hin-poc` tools are listed.
+
+### 2. Give the Copilot these instructions
+
+Paste this into the Copilot so it produces a parity-safe artifact (verbatim):
+
+> You have the `hin-poc` MCP tools. To build a re-generatable report:
+> 1. Reuse one `conversation_id` string for every tool call in this session.
+> 2. Call `nl_query` with the user's question. Read `suggested_sql` and the
+>    returned table and column lists.
+> 3. Refine the SQL, then `dry_run_sql` it. Fix any error and dry-run again.
+> 4. `execute_sql` with a clear snake_case `result_name` (for example
+>    `admissions_by_division`). Repeat for each result the report needs. Do not
+>    reference throwaway queries in the report; they drop out automatically.
+> 5. Build the report as an HTML body fragment where: every data table is
+>    `<table data-result="<result_name>">` with a `<thead>` of column names and a
+>    `<tbody>` whose cells are the exact values `execute_sql` returned; every
+>    headline number is `<span data-value="<result_name>.<field>">value</span>`;
+>    every recomputed sentence is an empty `<p data-reasoning="<id>"
+>    data-over="<result_name>.<field>" data-agg="max|min|avg|total"></p>`.
+> 6. Call `save_report_definition` with `report_name`, the `transcript`
+>    (`[{role, content}]`), and `final_artifact = {format: "html", title,
+>    content, formats: ["html", "md"]}`.
+> 7. Report back `status`, `parity.passed`, `report_id`, and any `warnings` or
+>    `unreplayable_sections`.
+
+### 3. The interactive loop, in short
+
+1. Ask a natural-language question ("admissions by division, last 30 days").
+2. `nl_query` -> refine SQL -> `dry_run_sql` -> `execute_sql` as a named result.
+3. Repeat for each result the report needs.
+4. Assemble the artifact per the contract in the next section.
+5. `save_report_definition`. On `status: registered` with `parity.passed: true`,
+   the report is replayable with `runner/regenerate.py --report-id <id>`.
+
+If parity fails, the response names the first differing table or value; the usual
+cause is cell text that does not match the query output (see the contract below).
+
 ## IMPORTANT: how the client must build the HTML artifact
 
 The compiler recovers a report's lineage from the HTML you submit. For a section
@@ -139,8 +201,11 @@ queries, runs the reasoning steps over the fresh results, renders every requeste
 format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`. Each step is
 recorded as a local observability span in `logs/spans.jsonl`.
 
-Note: the server holds the single read-write lock on the DuckDB file, so the
-runner opens the database read-only. It can run while the server is up.
+Note: the server holds an exclusive read-write lock on the DuckDB file. Because
+DuckDB does not allow a second process to open the same file while it is held
+read-write -- not even read-only -- **stop the MCP server before running the
+runner**. If the server is still up, the runner reports that the database is
+locked and asks you to stop it, rather than failing with a raw traceback.
 
 ## How it fits together
 
@@ -169,10 +234,14 @@ An `AnthropicReasoningEngine` (the design's LLM service) is wired behind the sam
 
 ```
 pip install -e ".[llm]"          # installs the anthropic SDK
-set POC_REASONING=anthropic       # Windows; use export on macOS/Linux
-# authenticate the SDK (ANTHROPIC_API_KEY or `ant auth login`)
+copy .env.example .env            # then edit .env and paste your key
 python runner/regenerate.py --report-id <id> --as-of 2025-05-15
 ```
+
+The `.env` file (gitignored) is loaded automatically at startup; set
+`POC_REASONING=anthropic` and `ANTHROPIC_API_KEY` there. Alternatively export
+those as environment variables. Real environment variables take precedence over
+`.env`.
 
 It uses `claude-opus-4-8` (override with `POC_REASONING_MODEL`) with adaptive
 thinking to write one grounded sentence per reasoning step over the fresh

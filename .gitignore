@@ -13,3 +13,6 @@ data/poc.duckdb.wal
 # Generated reports and local observability
 reports/
 logs/
+
+# Local secrets (LLM reasoning). Commit .env.example, never .env
+.env
