@@ -20,7 +20,10 @@ This is a copy-paste script for doing a full re-generatable-report run with
    `nl_query`, `dry_run_sql`, `execute_sql`, `save_report_definition`.
 
 `.github/copilot-instructions.md` is loaded automatically, so Copilot already
-knows the tool workflow and the HTML artifact contract.
+knows the tool workflow and the HTML artifact contract (the `data-result` /
+`data-value` / `data-reasoning` markup and the `final_artifact` shape). The
+prompts below therefore skip that markup detail and just name what each section
+should show; Copilot fills in the attributes from its instructions.
 
 ---
 
@@ -37,13 +40,13 @@ Using the hin-poc MCP tools, build a complete re-generatable report and save it.
 3. Build "average census and occupancy rate by facility" for the same window, executed as `census_by_facility`.
 4. Build a single overall occupancy rate for the same window, executed as `overall_occupancy`.
 
-Assemble an HTML body fragment with:
+Assemble the report as an HTML body fragment following the artifact contract in your instructions:
 - an <h1> title,
-- the two tables using data-result="admissions_by_division" and data-result="census_by_facility",
-- one headline: data-value="overall_occupancy.occupancy_rate",
-- one empty reasoning paragraph: data-reasoning="occ_summary" data-over="census_by_facility.occupancy_rate" data-agg="max".
+- a table for admissions_by_division and a table for census_by_facility,
+- a headline showing overall_occupancy's occupancy_rate,
+- one recomputed sentence (reasoning step id "occ_summary") over census_by_facility.occupancy_rate, aggregated as max.
 
-Build every cell and headline value directly from the exact numbers execute_sql returned. Then call save_report_definition with report_name "Division Admissions and Census", a short transcript, and final_artifact = {format:"html", title:"Division Admissions and Census", content:<the fragment>, formats:["html","md"]}.
+Then save it with save_report_definition: report_name "Division Admissions and Census", a short transcript, and output formats html and md.
 
 Report back: status, parity.passed, report_id, and any warnings or unreplayable_sections.
 ```
@@ -82,13 +85,13 @@ Execute one overall occupancy rate for the same window as "overall_occupancy". A
 **Message 5 — assemble the artifact:**
 
 ```text
-Assemble an HTML body fragment: an <h1> title, the admissions_by_division and census_by_facility tables with matching data-result attributes, one headline element with data-value="overall_occupancy.occupancy_rate", and one empty paragraph with data-reasoning="occ_summary" data-over="census_by_facility.occupancy_rate" data-agg="max". Build all cell and headline text from the exact execute_sql values. Show me the fragment.
+Assemble the report as an HTML body fragment per the artifact contract in your instructions: an <h1> title, tables for admissions_by_division and census_by_facility, a headline for overall_occupancy's occupancy_rate, and one recomputed sentence (reasoning step id "occ_summary") over census_by_facility.occupancy_rate aggregated as max. Show me the fragment.
 ```
 
 **Message 6 — save:**
 
 ```text
-Call save_report_definition with report_name "Division Admissions and Census", a short transcript of this session, and final_artifact = {format:"html", title:"Division Admissions and Census", content:<the fragment above>, formats:["html","md"]}. Then report status, parity.passed, report_id, and any warnings or unreplayable_sections.
+Call save_report_definition with report_name "Division Admissions and Census", a short transcript of this session, the fragment above as the artifact content, and output formats html and md. Then report status, parity.passed, report_id, and any warnings or unreplayable_sections.
 ```
 
 ---
