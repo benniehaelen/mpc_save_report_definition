@@ -95,6 +95,10 @@ Call save_report_definition with report_name "Division Admissions and Census", a
 
 ## After saving — replay it (VS Code terminal, not chat)
 
+**Stop the MCP server first** (MCP: List Servers → Stop `hin-poc`, or Ctrl-C its
+terminal). DuckDB holds an exclusive lock while the server is running, so the
+runner cannot open the database until the server is stopped.
+
 ```
 python runner/regenerate.py --list
 python runner/regenerate.py --report-id <report_id from chat> --as-of 2025-05-15

@@ -92,6 +92,8 @@ each requested format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`
 - The compiler (`Distiller`) and reasoning engine (`ReasoningEngine`) are
   deterministic implementations behind protocols. Prefer swapping an implementation
   behind the protocol over editing call sites.
-- The server holds the single read-write lock on the DuckDB file; the runner opens
-  it read-only and can run while the server is up.
+- The server holds an exclusive read-write lock on the DuckDB file. DuckDB will
+  not let a second process open the same file while it is held read-write, so
+  **stop the MCP server before running `regenerate.py`** (it now reports a clear
+  "database is locked" message if you forget).
 - Run the tests with `pytest -q` before committing changes to server or runner code.
