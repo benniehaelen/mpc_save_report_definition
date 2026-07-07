@@ -50,7 +50,11 @@ query results.
   element with `data-reasoning="<step_id>"`, `data-over="<result_name>.<field>"`,
   and optional `data-agg="max|min|avg|total"` (default `max`), for example
   `<p data-reasoning="occ_summary" data-over="census_by_facility.occupancy_rate" data-agg="max"></p>`.
-  The runner fills it at replay so the narrative tracks the data.
+  The runner fills it at replay so the narrative tracks the data. `data-agg`
+  chooses what is computed over `<field>`: `max`/`min` report the highest/lowest
+  value and the row it belongs to (that row's first non-numeric column, e.g. a
+  facility name), `avg` reports the mean, and `total` reports the sum. Pick the
+  aggregation that matches the sentence you want; use one step per sentence.
 - **Metric bindings are inferred** by matching table headers and `data-value`
   fields to metric ids and dimension ValueSets in the knowledge graph. No extra
   markup is needed; unknown fields are left unbound.

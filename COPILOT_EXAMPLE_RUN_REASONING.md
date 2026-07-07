@@ -10,28 +10,11 @@ the tool workflow and the HTML artifact contract (including the reasoning markup
 and the `final_artifact` shape). The prompts below name what each reasoning step
 should say and leave the attributes to Copilot's instructions.
 
-## What a reasoning step is (quick primer)
-
-A reasoning step is an **empty** element the runner fills in at replay:
-
-```html
-<p data-reasoning="<step_id>" data-over="<result_name>.<field>" data-agg="max|min|avg|total"></p>
-```
-
-At replay the engine computes that aggregate over the freshly executed result and
-writes one grounded sentence. Because it runs on whatever the replay produced, the
-sentence tracks the data on the report date. The four aggregations read as:
-
-| `data-agg` | Sentence shape (deterministic engine) |
-|------------|----------------------------------------|
-| `max` (default) | "Across N rows, the highest `<field>` is `<value>` at `<label>`." |
-| `min` | "Across N rows, the lowest `<field>` is `<value>` at `<label>`." |
-| `avg` | "The average `<field>` across N rows is `<value>`." |
-| `total` | "The total `<field>` across N rows is `<value>`." |
-
-`<label>` is the row's first non-numeric column (e.g. `facility_name`). Reasoning
-prose carries no `data-value`, so it is **not** checked by the parity gate — only
-the tables and headline numbers are.
+Your instructions already define reasoning steps and the four aggregations
+(`max`/`min`/`avg`/`total`) and note that reasoning prose is not parity-checked,
+so the prompts below just name each step's result, field, and aggregation. This
+example wires up **one of each aggregation** so you can watch all four sentences
+recompute across replay dates.
 
 ## Before you open chat (one time)
 
