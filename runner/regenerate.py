@@ -16,6 +16,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import duckdb
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from runner import render  # noqa: E402
@@ -25,6 +27,29 @@ from server.observability import RunRecorder  # noqa: E402
 from server.parity import run_named_query  # noqa: E402
 
 _EXTENSIONS = {"html": "html", "md": "md"}
+
+
+def _open_readonly():
+    """Open the DuckDB file read-only for a replay run.
+
+    DuckDB takes an exclusive OS-level lock when a database is opened read-write,
+    so while the MCP server holds the file no other process can attach to it --
+    not even read-only. Translate that lock error into an actionable message
+    instead of a raw traceback.
+    """
+    try:
+        return get_connection(read_only=True)
+    except duckdb.IOException as exc:
+        raise SystemExit(
+            "Cannot open the database: it is locked by another process, usually "
+            "the running MCP server (server/main.py). DuckDB does not allow a "
+            "second process to open the file while the server holds it "
+            "read-write, so stop the MCP server first, then run this command "
+            "again.\n"
+            "  VS Code: run 'MCP: List Servers' from the Command Palette and "
+            "Stop 'hin-poc' (or Ctrl-C the terminal running it).\n"
+            f"Underlying error: {exc}"
+        ) from exc
 
 
 def _list_reports(con) -> None:
@@ -47,7 +72,7 @@ def regenerate(
     out_dir: Path,
     formats: list[str] | None = None,
 ) -> list[Path]:
-    con = get_connection(read_only=True)
+    con = _open_readonly()
     recorder = RunRecorder(report_id, version or 0, as_of)
 
     with recorder.span("fetch_definition"):
@@ -118,7 +143,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--list", action="store_true", help="List registered reports.")
     args = parser.parse_args(argv)
 
-    con = get_connection(read_only=True)
+    con = _open_readonly()
     if args.list:
         _list_reports(con)
         return

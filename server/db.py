@@ -24,8 +24,10 @@ _CONNECTIONS: dict[tuple[str, bool], duckdb.DuckDBPyConnection] = {}
 def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """Return a cached DuckDB connection.
 
-    The server uses a read-write connection; the runner opens read-only so it
-    does not fight the server for the single-writer file lock.
+    The server uses a read-write connection. DuckDB takes an exclusive
+    OS-level lock in read-write mode, so a second process (such as the replay
+    runner) cannot open the same file while the server is running -- not even
+    read-only. Stop the server before running the runner.
     """
     if not DB_PATH.exists():
         raise FileNotFoundError(

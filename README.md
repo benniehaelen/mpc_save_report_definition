@@ -139,8 +139,11 @@ queries, runs the reasoning steps over the fresh results, renders every requeste
 format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`. Each step is
 recorded as a local observability span in `logs/spans.jsonl`.
 
-Note: the server holds the single read-write lock on the DuckDB file, so the
-runner opens the database read-only. It can run while the server is up.
+Note: the server holds an exclusive read-write lock on the DuckDB file. Because
+DuckDB does not allow a second process to open the same file while it is held
+read-write -- not even read-only -- **stop the MCP server before running the
+runner**. If the server is still up, the runner reports that the database is
+locked and asks you to stop it, rather than failing with a raw traceback.
 
 ## How it fits together
 
