@@ -16,3 +16,6 @@ logs/
 
 # Local secrets (LLM reasoning). Commit .env.example, never .env
 .env
+
+# Claude Code local settings and worktrees
+.claude/

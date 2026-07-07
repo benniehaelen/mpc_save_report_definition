@@ -11,6 +11,8 @@ import datetime as dt
 
 import duckdb
 
+from server.db import execute_params
+
 
 def log_call(
     con: duckdb.DuckDBPyConnection,
@@ -24,7 +26,8 @@ def log_call(
     next_id = con.execute(
         "SELECT COALESCE(MAX(call_id), 0) + 1 FROM tool_call_log"
     ).fetchone()[0]
-    con.execute(
+    execute_params(
+        con,
         "INSERT INTO tool_call_log VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             next_id,
@@ -41,7 +44,8 @@ def log_call(
 
 def fetch(con: duckdb.DuckDBPyConnection, conversation_id: str) -> list[dict]:
     """Return this conversation's logged calls, oldest first."""
-    rows = con.execute(
+    rows = execute_params(
+        con,
         """
         SELECT call_id, conversation_id, tool_name, sql_text, result_name,
                row_count, called_at

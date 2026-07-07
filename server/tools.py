@@ -17,7 +17,7 @@ from server import (
     parity,
     registry,
 )
-from server.db import ANCHOR_DATE, get_connection
+from server.db import ANCHOR_DATE, execute_params, get_connection
 
 _ROW_CAP = 500
 _FORBIDDEN_START = re.compile(
@@ -50,7 +50,8 @@ def _schema_catalog(con) -> dict[str, list[str]]:
     ).fetchall()
     catalog: dict[str, list[str]] = {}
     for (table_name,) in tables:
-        cols = con.execute(
+        cols = execute_params(
+            con,
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = ? ORDER BY ordinal_position",
             [table_name],

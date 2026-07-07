@@ -12,6 +12,8 @@ import re
 
 import duckdb
 
+from server.db import execute_params
+
 
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
@@ -26,13 +28,15 @@ def register(
 ) -> tuple[str, int]:
     """Insert a new definition version and return (report_id, version)."""
     report_id = slugify(report_name)
-    version = con.execute(
+    version = execute_params(
+        con,
         "SELECT COALESCE(MAX(definition_version), 0) + 1 "
         "FROM report_definitions WHERE report_id = ?",
         [report_id],
     ).fetchone()[0]
     definition = {**definition, "report_id": report_id, "definition_version": version}
-    con.execute(
+    execute_params(
+        con,
         "INSERT INTO report_definitions VALUES (?, ?, ?, ?, ?, ?)",
         [
             report_id,
@@ -53,13 +57,15 @@ def get(
 ) -> dict:
     """Fetch a stored definition document, defaulting to the latest version."""
     if version is None:
-        row = con.execute(
+        row = execute_params(
+            con,
             "SELECT definition_json FROM report_definitions "
             "WHERE report_id = ? ORDER BY definition_version DESC LIMIT 1",
             [report_id],
         ).fetchone()
     else:
-        row = con.execute(
+        row = execute_params(
+            con,
             "SELECT definition_json FROM report_definitions "
             "WHERE report_id = ? AND definition_version = ?",
             [report_id, version],
