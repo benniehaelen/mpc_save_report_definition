@@ -16,6 +16,12 @@ dev = ["pytest>=8.0", "harlequin>=1.0"]
 # Optional LLM-backed reasoning engine (opt-in via POC_REASONING=anthropic).
 llm = ["anthropic>=0.69"]
 
+# The importable packages. Declared explicitly because the repo also has
+# non-package top-level dirs (data/, scripts/, tests/, templates/), which would
+# otherwise make setuptools' flat-layout auto-discovery ambiguous and fail.
+[tool.setuptools.packages.find]
+include = ["server*", "runner*"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
