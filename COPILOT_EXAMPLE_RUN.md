@@ -51,6 +51,11 @@ Then save it with save_report_definition: report_name "Division Admissions and C
 Report back: status, parity.passed, report_id, and any warnings or unreplayable_sections.
 ```
 
+To see the report *before* it is saved, add a line asking Copilot to "write the
+assembled fragment to `reports/_artifact.html` and stop before saving", then
+preview it with `python scripts/preview_artifact.py reports/_artifact.html`
+(see Message 6 under Option B).
+
 ---
 
 ## Option B — step by step (one message per turn)
@@ -88,7 +93,29 @@ Execute one overall occupancy rate for the same window as "overall_occupancy". A
 Assemble the report as an HTML body fragment per the artifact contract in your instructions: an <h1> title, tables for admissions_by_division and census_by_facility, a headline for overall_occupancy's occupancy_rate, and one recomputed sentence (reasoning step id "occ_summary") over census_by_facility.occupancy_rate aggregated as max. Show me the fragment.
 ```
 
-**Message 6 — save:**
+**Message 6 — preview the report before saving:**
+
+You have the fragment, but not a rendered page yet — the base page shell (the
+styling) is only added at render time. Preview it so you can see the *original
+artifact* before it is saved and parity-checked. Ask Copilot:
+
+```text
+Write the exact HTML fragment above to reports/_artifact.html.
+```
+
+Then in the VS Code terminal — the server can stay running, since this only
+reads the base template and never touches the database:
+
+```
+python scripts/preview_artifact.py reports/_artifact.html
+```
+
+It wraps the fragment in the report's base template, writes
+`reports/_preview.html`, and opens it in your browser. The data tables and the
+headline number are exactly what the parity gate will lock; the reasoning
+sentence is blank here because it is recomputed at replay.
+
+**Message 7 — save:**
 
 ```text
 Call save_report_definition with report_name "Division Admissions and Census", a short transcript of this session, the fragment above as the artifact content, and output formats html and md. Then report status, parity.passed, report_id, and any warnings or unreplayable_sections.

@@ -188,6 +188,13 @@ the strategic render_report tool.
 Convenience builders live in `runner/render.py` (`build_table_html`,
 `build_value_span`) if you want to construct a parity-safe artifact directly.
 
+To see the report *before* you save it, write the assembled body fragment to a
+file and run `python scripts/preview_artifact.py <fragment.html>`. It wraps the
+fragment in the same base template the runner uses and opens the page in your
+browser, so you can inspect the original artifact — the tables and headline
+numbers the parity gate will lock — ahead of `save_report_definition`. It only
+reads the template, so it is safe to run while the server is up.
+
 ## Regenerating a report
 
 ```

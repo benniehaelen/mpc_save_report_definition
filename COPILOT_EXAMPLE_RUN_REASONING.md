@@ -59,6 +59,11 @@ Then save it with save_report_definition: report_name "Facility Occupancy Narrat
 Report back: status, parity.passed, report_id, and the four reasoning sentences the save produced.
 ```
 
+To see the report *before* it is saved, add a line asking Copilot to "write the
+assembled fragment to `reports/_artifact.html` and stop before saving", then
+preview it with `python scripts/preview_artifact.py reports/_artifact.html`
+(see Message 4 under Option B).
+
 ---
 
 ## Option B — step by step (one message per turn)
@@ -89,7 +94,30 @@ Assemble the report as an HTML body fragment per the artifact contract in your i
 Show me the fragment.
 ```
 
-**Message 4 — save:**
+**Message 4 — preview the report before saving:**
+
+You have the fragment, but not a rendered page yet — the base page shell (the
+styling) is only added at render time. Preview it so you can see the *original
+artifact* before it is saved and parity-checked. Ask Copilot:
+
+```text
+Write the exact HTML fragment above to reports/_artifact.html.
+```
+
+Then in the VS Code terminal — the server can stay running, since this only
+reads the base template and never touches the database:
+
+```
+python scripts/preview_artifact.py reports/_artifact.html
+```
+
+It wraps the fragment in the report's base template, writes
+`reports/_preview.html`, and opens it in your browser. The two data tables are
+what the parity gate will lock; all four reasoning paragraphs are blank here
+(shown as "↻ recomputed at replay time") because their narrative is generated at
+replay, not at save.
+
+**Message 5 — save:**
 
 ```text
 Call save_report_definition with report_name "Facility Occupancy Narrative", a short transcript of this session, the fragment above as the artifact content, and output formats html and md. Then report status, parity.passed, report_id, and the four reasoning sentences the save produced.
