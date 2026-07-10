@@ -53,8 +53,6 @@ CREATE TABLE IF NOT EXISTS tool_call_log (
   result_fingerprint TEXT,
   result_rows        TEXT
 );
-CREATE INDEX IF NOT EXISTS tool_call_log_conversation
-  ON tool_call_log (conversation_id, call_id);
 
 CREATE TABLE IF NOT EXISTS report_definitions (
   report_id          TEXT NOT NULL,
@@ -70,17 +68,35 @@ CREATE TABLE IF NOT EXISTS extraction_plans (
   token           TEXT PRIMARY KEY,
   conversation_id TEXT,
   plan_json       TEXT,
-  created_at      TEXT
+  created_at      TEXT,
+  consumed_at     TEXT,
+  report_id       TEXT
 );
 """
 
-# Columns added to tool_call_log after the table first shipped. `CREATE TABLE IF
-# NOT EXISTS` only helps a fresh store, so an existing poc_meta.sqlite needs an
-# explicit ALTER. Guarded by a pragma check, so it is idempotent and cheap.
-_TOOL_CALL_LOG_ADDED_COLUMNS = (
-    ("result_fingerprint", "TEXT"),
-    ("result_rows", "TEXT"),
-)
+# Indexes are applied *after* the column migration, never inside META_SCHEMA. An
+# index over a column an older store has not gained yet ("no such column:
+# consumed_at") would fail before the ALTER that adds it ever ran.
+META_INDEXES = """
+CREATE INDEX IF NOT EXISTS tool_call_log_conversation
+  ON tool_call_log (conversation_id, call_id);
+CREATE INDEX IF NOT EXISTS extraction_plans_conversation
+  ON extraction_plans (conversation_id, consumed_at);
+"""
+
+# Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` only
+# helps a fresh store, so an existing poc_meta.sqlite needs an explicit ALTER.
+# Guarded by a pragma check, so it is idempotent and cheap.
+_ADDED_COLUMNS = {
+    "tool_call_log": (
+        ("result_fingerprint", "TEXT"),
+        ("result_rows", "TEXT"),
+    ),
+    "extraction_plans": (
+        ("consumed_at", "TEXT"),
+        ("report_id", "TEXT"),
+    ),
+}
 
 _META_TABLES = ("tool_call_log", "report_definitions", "extraction_plans")
 
@@ -126,17 +142,21 @@ def get_meta_connection() -> sqlite3.Connection:
         con.execute("PRAGMA busy_timeout=30000")
         con.executescript(META_SCHEMA)
         _migrate_meta_store(con)
+        con.executescript(META_INDEXES)
         con.commit()
         _META_CONNECTIONS[key] = con
     return con
 
 
 def _migrate_meta_store(con: sqlite3.Connection) -> None:
-    """Add columns that post-date the original tool_call_log, in place."""
-    existing = {row[1] for row in con.execute("PRAGMA table_info(tool_call_log)")}
-    for column, sql_type in _TOOL_CALL_LOG_ADDED_COLUMNS:
-        if column not in existing:
-            con.execute(f"ALTER TABLE tool_call_log ADD COLUMN {column} {sql_type}")
+    """Add columns that post-date their table's first shipping, in place."""
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # the table does not exist yet in this store
+        for column, sql_type in columns:
+            if column not in existing:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
 def reset_meta_store() -> None:
@@ -145,6 +165,7 @@ def reset_meta_store() -> None:
     for table in _META_TABLES:
         con.execute(f"DROP TABLE IF EXISTS {table}")
     con.executescript(META_SCHEMA)
+    con.executescript(META_INDEXES)
     con.commit()
 
 

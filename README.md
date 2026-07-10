@@ -218,8 +218,21 @@ structure_confirmations=[
 ```
 
 The plan is cached under its token, so the second call applies exactly what you
-were shown; the model is not asked again. A wrong or unknown token registers
-nothing.
+were shown; the model is not asked again.
+
+A token names one **proposal**, and it is **single-use**:
+
+| Situation | Status returned |
+|---|---|
+| unknown token, or a token from another conversation | `structure_confirmation_expired` |
+| the artifact changed since the proposal was made | `structure_confirmation_stale` |
+| the token already registered a report | `structure_confirmation_used` (names that report) |
+| confirmations given but no token | `invalid_structure_confirmation` |
+
+None of these register anything. A plan is a set of source offsets into the page
+it was proposed against, so applying it to an edited page would splice at the
+wrong bytes — hence the staleness check. A parity failure leaves the token
+*unspent*, so you can fix the artifact and retry the same confirmed plan.
 
 Two guarantees hold whichever engine proposed the plan. The server **executes**
 every proposed derived query and checks it really does reproduce the numbers it

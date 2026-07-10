@@ -228,13 +228,14 @@ def _normalize_free_form(
     conversation_id: str,
     final_artifact: dict,
     structure_confirmations: list[dict] | None,
-) -> tuple[dict | None, dict, list[str]]:
+) -> tuple[dict | None, dict, list[str], str | None]:
     """Fingerprint, propose, confirm, and rewrite a free-form artifact.
 
-    Returns ``(early_response, normalized_artifact, warnings)``. When
+    Returns ``(early_response, normalized_artifact, warnings, token)``. When
     ``early_response`` is not None the caller must return it unchanged: the plan
     contains inferences the client has not yet confirmed, and nothing may be
-    registered on inference alone.
+    registered on inference alone. ``token`` names the confirmed plan, so the
+    caller can mark it consumed once a definition is registered.
     """
     meta = get_meta_connection()
     html = final_artifact.get("content", "")
@@ -247,6 +248,7 @@ def _normalize_free_form(
         con=get_connection(),
         meta=meta,
     )
+    token: str | None = None
 
     if structure_confirmations:
         token = next((c.get("token") for c in structure_confirmations if c.get("token")), None)
@@ -259,6 +261,7 @@ def _normalize_free_form(
                 },
                 final_artifact,
                 [],
+                None,
             )
         cached = extraction_cache.load(meta, token)
         if cached is None or cached["conversation_id"] != conversation_id:
@@ -270,26 +273,55 @@ def _normalize_free_form(
                 },
                 final_artifact,
                 [],
+                None,
             )
-        plan = cached["plan"]
-        if extraction_cache.plan_token(plan) != token:
+        if cached["consumed_at"]:
+            # A token is single-use. Re-presenting it would quietly register a
+            # second version of a report the client already has.
             return (
                 {
-                    "status": "structure_confirmation_stale",
-                    "error": "the cached plan no longer hashes to its token",
+                    "status": "structure_confirmation_used",
+                    "error": f"this confirmation token was already used on "
+                    f"{cached['consumed_at']} to register "
+                    f"{cached['report_id']!r}; call save_report_definition without "
+                    "structure_confirmations to get a fresh proposal",
+                    "report_id": cached["report_id"],
                 },
                 final_artifact,
                 [],
+                None,
             )
+        if cached["html_sha256"] != extraction_cache.html_token(html):
+            # The plan is a set of offsets into the HTML it was proposed against.
+            # Splicing it into an edited page would cut at the wrong bytes.
+            return (
+                {
+                    "status": "structure_confirmation_stale",
+                    "error": "the artifact changed since this plan was proposed; "
+                    "call save_report_definition without structure_confirmations "
+                    "to get a fresh proposal for the new page",
+                },
+                final_artifact,
+                [],
+                None,
+            )
+        plan = cached["plan"]
+        warnings = list(plan.get("_warnings", []))
         plan = _apply_overrides(plan, structure_confirmations)
-        warnings = list(cached["plan"].get("_warnings", []))
     else:
         proposed = extractor.get_extractor().propose(html, report, session)
         plan, warnings = extractor.validate_plan(proposed, report, session)
         if extractor.has_inferences(plan):
             plan["_warnings"] = warnings
-            token = extraction_cache.plan_token(plan)
-            extraction_cache.save(meta, token, conversation_id, plan)
+            token, created_at = extraction_cache.new_token(plan, conversation_id)
+            extraction_cache.save(
+                meta,
+                token,
+                conversation_id,
+                plan,
+                extraction_cache.html_token(html),
+                created_at,
+            )
             return (
                 {
                     "status": "needs_structure_confirmation",
@@ -301,6 +333,7 @@ def _normalize_free_form(
                 },
                 final_artifact,
                 warnings,
+                token,
             )
 
     # Derived queries were executed (and logged as save_derive) during validation,
@@ -311,9 +344,12 @@ def _normalize_free_form(
         html, plan, logged_rows, report, save_date=ANCHOR_DATE
     )
     normalized = {**final_artifact, "content": normalized_html}
-    return None, normalized, warnings + summary.warnings + [
-        f"unextracted: {item}" for item in summary.unmatched
-    ]
+    return (
+        None,
+        normalized,
+        warnings + summary.warnings + [f"unextracted: {item}" for item in summary.unmatched],
+        token,
+    )
 
 
 def _rows_by_result(calls: list[dict]) -> dict[str, list[dict]]:
@@ -349,8 +385,9 @@ def save_report_definition(
     catalog = knowledge_graph.load_catalog(con)
 
     extraction_warnings: list[str] = []
+    confirmed_token: str | None = None
     if artifact.detect_mode(final_artifact.get("content", "")) == "free_form":
-        early, final_artifact, extraction_warnings = _normalize_free_form(
+        early, final_artifact, extraction_warnings, confirmed_token = _normalize_free_form(
             conversation_id, final_artifact, structure_confirmations
         )
         if early is not None:
@@ -391,6 +428,8 @@ def save_report_definition(
         "diff_summary": parity_result["diff_summary"],
     }
     if not parity_result["passed"]:
+        # The token stays unspent: the plan was fine, the artifact was not, and the
+        # client should be able to retry the same confirmed plan.
         return {
             "status": "parity_failed",
             "report_id": None,
@@ -401,6 +440,8 @@ def save_report_definition(
         }
 
     report_id, version = registry.register(meta, report_name, definition, attempts)
+    if confirmed_token:
+        extraction_cache.mark_consumed(meta, confirmed_token, report_id)
     return {
         "status": "registered",
         "report_id": report_id,

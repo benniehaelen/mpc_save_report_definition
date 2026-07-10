@@ -303,6 +303,143 @@ def test_the_cached_plan_is_reused_not_reproposed(session, monkeypatch):
     assert proposals["n"] == 1, "the extractor was re-run on the confirmation call"
 
 
+def test_a_consumed_token_cannot_register_a_second_report(session, monkeypatch):
+    """A token is single-use. Replaying it must not quietly make another version."""
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Single Use")
+    token = first["confirmation_token"]
+    second = _save(cid, html, "FF Single Use", [{"token": token, "accept_all": True}])
+    assert second["status"] == "registered"
+
+    third = _save(cid, html, "FF Single Use", [{"token": token, "accept_all": True}])
+    assert third["status"] == "structure_confirmation_used"
+    assert third["report_id"] == second["report_id"]
+    assert "already used" in third["error"]
+
+    # Still exactly one version: the replay registered nothing.
+    versions = [
+        r["definition_version"]
+        for r in registry.list_all(get_meta_connection())
+        if r["report_id"] == second["report_id"]
+    ]
+    assert versions == [second["definition_version"]]
+
+
+def test_the_consumed_plan_is_kept_as_an_audit_trail(session, monkeypatch):
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Audit")
+    token = first["confirmation_token"]
+    saved = _save(cid, html, "FF Audit", [{"token": token, "accept_all": True}])
+
+    cached = extraction_cache.load(get_meta_connection(), token)
+    assert cached["consumed_at"] and cached["report_id"] == saved["report_id"]
+    assert cached["plan"]["derived_queries"], "the approved plan is still readable"
+
+
+def test_two_proposals_of_the_same_plan_get_different_tokens(session, monkeypatch):
+    """A token names a proposal, not a plan; otherwise 'already used' is meaningless."""
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Two Proposals")
+    second = _save(cid, html, "FF Two Proposals")
+    assert first["confirmation_token"] != second["confirmation_token"]
+
+
+def test_a_superseded_proposal_is_pruned(session, monkeypatch):
+    """Re-proposing replaces the unconsumed plan instead of leaking a row."""
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    _save(cid, html, "FF Prune")
+    _save(cid, html, "FF Prune")
+    _save(cid, html, "FF Prune")
+
+    meta = get_meta_connection()
+    rows = meta.execute(
+        "SELECT COUNT(*) FROM extraction_plans WHERE conversation_id = ? AND consumed_at IS NULL",
+        (cid,),
+    ).fetchone()[0]
+    assert rows == 1
+
+
+def test_a_consumed_plan_is_not_pruned_by_a_later_proposal(session, monkeypatch):
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Keep Audit")
+    token = first["confirmation_token"]
+    _save(cid, html, "FF Keep Audit", [{"token": token, "accept_all": True}])
+
+    # A fresh proposal for the same conversation must not erase the approved one.
+    _save(cid, html, "FF Keep Audit")
+    assert extraction_cache.load(get_meta_connection(), token)["consumed_at"]
+
+
+def test_a_page_edited_between_the_two_calls_is_refused(session, monkeypatch):
+    """The plan is a set of offsets into the page it was proposed against."""
+    from server import extractor
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Stale")
+    token = first["confirmation_token"]
+
+    edited = html.replace("<div>", "<div><h1>A new heading that shifts every offset</h1>", 1)
+    second = _save(cid, edited, "FF Stale", [{"token": token, "accept_all": True}])
+    assert second["status"] == "structure_confirmation_stale"
+    assert "the artifact changed" in second["error"]
+
+    # The unedited page still confirms cleanly against the same token.
+    third = _save(cid, html, "FF Stale", [{"token": token, "accept_all": True}])
+    assert third["status"] == "registered", third
+
+
+def test_an_unconsumed_token_survives_a_parity_failure(session, monkeypatch):
+    """The plan was fine; the artifact was not. The client may retry the same plan."""
+    from server import extractor, parity
+
+    cid, result = session
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+
+    first = _save(cid, html, "FF Parity Retry")
+    token = first["confirmation_token"]
+
+    monkeypatch.setattr(
+        parity, "check", lambda *a, **k: {"passed": False, "diff_summary": "forced failure"}
+    )
+    failed = _save(cid, html, "FF Parity Retry", [{"token": token, "accept_all": True}])
+    assert failed["status"] == "parity_failed"
+    assert extraction_cache.load(get_meta_connection(), token)["consumed_at"] is None
+
+    monkeypatch.undo()
+    monkeypatch.setattr(extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})())
+    retried = _save(cid, html, "FF Parity Retry", [{"token": token, "accept_all": True}])
+    assert retried["status"] == "registered", retried
+
+
 def test_the_plan_token_is_stable_across_serialization():
     plan = {"islands": [{"blob_id": "b", "result_name": "r"}], "values": []}
     assert extraction_cache.plan_token(plan) == extraction_cache.plan_token(json.loads(json.dumps(plan)))

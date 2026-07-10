@@ -125,8 +125,14 @@ structure_confirmations=[
 ]
 ```
 
-Nothing is registered until you confirm. `scripts/demo_free_form.py` is a worked
-example of the whole flow.
+Nothing is registered until you confirm. The token is **single-use** and belongs
+to the exact page it was proposed against: re-sending it after a successful save
+returns `structure_confirmation_used`, and confirming after editing the artifact
+returns `structure_confirmation_stale`. In both cases, call again without
+`structure_confirmations` to get a fresh proposal. A `parity_failed` result leaves
+the token usable, so fix the artifact and retry with the same token.
+
+`scripts/demo_free_form.py` is a worked example of the whole flow.
 
 ## The v2 contract (charts, tabs, editorial)
 

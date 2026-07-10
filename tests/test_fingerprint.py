@@ -149,6 +149,45 @@ def test_migration_is_idempotent(tmp_path):
     con.close()
 
 
+def test_migration_skips_tables_that_do_not_exist_yet(tmp_path):
+    """A store with tool_call_log but no extraction_plans must migrate cleanly."""
+    con = sqlite3.connect(str(tmp_path / "partial.sqlite"))
+    con.executescript(_PRE_WS11_SCHEMA)
+    db._migrate_meta_store(con)  # extraction_plans absent; must not raise
+    con.close()
+
+
+_PRE_CONSUME_PLANS = """
+CREATE TABLE extraction_plans (
+  token           TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  plan_json       TEXT,
+  created_at      TEXT
+);
+"""
+
+
+def test_migration_adds_the_plan_consumption_columns(tmp_path):
+    con = sqlite3.connect(str(tmp_path / "plans.sqlite"))
+    con.executescript(_PRE_WS11_SCHEMA + _PRE_CONSUME_PLANS)
+    con.execute(
+        "INSERT INTO extraction_plans VALUES ('tok', 'cid', '{}', 'now')"
+    )
+    con.commit()
+
+    db._migrate_meta_store(con)
+    con.commit()
+
+    cols = {row[1] for row in con.execute("PRAGMA table_info(extraction_plans)")}
+    assert {"consumed_at", "report_id"} <= cols
+    # The pre-existing plan survives, unconsumed.
+    assert con.execute("SELECT consumed_at, report_id FROM extraction_plans").fetchone() == (
+        None,
+        None,
+    )
+    con.close()
+
+
 def test_log_call_is_still_callable_with_six_positional_args():
     """The new columns are trailing and optional; existing call sites are untouched."""
     meta = get_meta_connection()
