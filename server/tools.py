@@ -17,7 +17,12 @@ from server import (
     parity,
     registry,
 )
-from server.db import ANCHOR_DATE, execute_params, get_connection
+from server.db import (
+    ANCHOR_DATE,
+    execute_params,
+    get_connection,
+    get_meta_connection,
+)
 
 _ROW_CAP = 500
 _FORBIDDEN_START = re.compile(
@@ -112,7 +117,7 @@ def execute_sql(conversation_id: str, sql: str, result_name: str) -> dict:
     fetched = fetched[:_ROW_CAP]
     rows = [dict(zip(columns, row)) for row in fetched]
     call_log.log_call(
-        con, conversation_id, "execute_sql", sql, result_name, len(rows)
+        get_meta_connection(), conversation_id, "execute_sql", sql, result_name, len(rows)
     )
     return {
         "result_name": result_name,
@@ -132,7 +137,8 @@ def save_report_definition(
 ) -> dict:
     """Distill a definition, run the parity gate, and register on pass."""
     con = get_connection()
-    log_rows = call_log.fetch(con, conversation_id)
+    meta = get_meta_connection()
+    log_rows = call_log.fetch(meta, conversation_id)
     catalog = knowledge_graph.load_catalog(con)
 
     definition: dict = {}
@@ -177,7 +183,7 @@ def save_report_definition(
             "unreplayable_sections": definition.get("unreplayable_sections", []),
         }
 
-    report_id, version = registry.register(con, report_name, definition, attempts)
+    report_id, version = registry.register(meta, report_name, definition, attempts)
     return {
         "status": "registered",
         "report_id": report_id,

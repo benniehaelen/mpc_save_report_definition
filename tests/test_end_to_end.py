@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from runner import render
 from server import parity, reasoning, registry, tools
-from server.db import ANCHOR_DATE, get_connection
+from server.db import ANCHOR_DATE, get_connection, get_meta_connection
 
 CID = "e2e-session"
 
@@ -77,7 +77,7 @@ def test_end_to_end_save_and_regenerate():
     report_id = result["report_id"]
 
     con = get_connection()
-    definition = registry.get(con, report_id)
+    definition = registry.get(get_meta_connection(), report_id)
 
     # Dead-end query dropped out.
     names = [q["result_name"] for q in definition["parameterized_sql"]]

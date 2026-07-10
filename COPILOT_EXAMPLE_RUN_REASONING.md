@@ -127,9 +127,9 @@ Call save_report_definition with report_name "Facility Occupancy Narrative", a s
 
 ## After saving — replay it (VS Code terminal, not chat)
 
-**Stop the MCP server first** (MCP: List Servers → Stop `hin-poc`, or Ctrl-C its
-terminal). DuckDB holds an exclusive lock while the server is running, so the
-runner cannot open the database until the server is stopped.
+You can leave the MCP server running: the runner opens the warehouse read-only,
+which takes a shared lock, and reads the definition from the SQLite metadata
+store.
 
 ```
 python runner/regenerate.py --list

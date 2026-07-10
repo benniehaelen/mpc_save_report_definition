@@ -1,29 +1,34 @@
-# Viewing the DuckDB data
+# Viewing the data
 
-The POC database lives at `data/poc.duckdb`. Because DuckDB takes an **exclusive
-lock** in read-write mode, only one process can open the file at a time, so
-**stop the MCP server before browsing the data** (otherwise the viewer reports
-that the file is locked).
+The analytic warehouse lives at `data/poc.duckdb`, and the platform metadata --
+`tool_call_log` and `report_definitions` -- lives at `data/poc_meta.sqlite`.
+
+Browsing is safe while the MCP server is running, **as long as you open the
+warehouse read-only** (`-r`). Read-only DuckDB connections take a shared lock and
+coexist happily. A read-write open takes an exclusive lock that shuts out the
+server and everything else, so don't drop the `-r`.
 
 ## Option 1: Harlequin (terminal DuckDB browser)
 
 Harlequin is already included in the `dev` extra (`pip install -e ".[dev]"`).
 
 ```bash
-# 1. Make sure no hin-poc server holds the lock
-powershell -File scripts/servers.ps1 -Kill
-
-# 2. Open the database (read-only is safest for browsing)
 .venv/Scripts/harlequin -r data/poc.duckdb
 ```
 
-- `-r` opens **read-only**, so you can't accidentally lock out the server or
-  mutate data. Drop it if you actually want to run writes.
+- `-r` opens **read-only**. Keep it: without it, DuckDB takes an exclusive lock
+  and the running server loses access to the warehouse.
 - The left panel lists tables: `admissions`, `daily_census`, `facilities`,
-  `metrics`, `value_sets`, `dimension_value_sets`, `report_definitions`,
-  `tool_call_log`.
+  `marketshare_volume`, `metrics`, `value_sets`, `dimension_value_sets`.
 - Type SQL in the editor and press **Ctrl+Enter** to run it.
 - Quit with **Ctrl+Q**.
+
+`report_definitions` and `tool_call_log` are **not** in this file. Browse them
+with any SQLite client:
+
+```bash
+sqlite3 data/poc_meta.sqlite "SELECT report_id, definition_version FROM report_definitions;"
+```
 
 Example queries:
 
@@ -49,10 +54,7 @@ pretty-printed is via the `registry.get()` helper, which parses the JSON for
 you:
 
 ```bash
-# Stop the server first so the DB lock is free
-powershell -File scripts/servers.ps1 -Kill
-
-.venv/Scripts/python.exe -c "import json; from server import registry; from server.db import get_connection; print(json.dumps(registry.get(get_connection(read_only=True), 'division_admissions_and_census'), indent=2, default=str))"
+.venv/Scripts/python.exe -c "import json; from server import registry; from server.db import get_meta_connection; print(json.dumps(registry.get(get_meta_connection(), 'division_admissions_and_census'), indent=2, default=str))"
 ```
 
 `registry.get(con, report_id, version=None)` defaults to the latest version;
@@ -64,9 +66,11 @@ Find the available `report_id`s with:
 .venv/Scripts/python.exe runner/regenerate.py --list
 ```
 
-Or query the raw column directly in Harlequin (shown as one long JSON string):
+Or query the raw column directly against the metadata store (one long JSON
+string):
 
 ```sql
+-- sqlite3 data/poc_meta.sqlite
 SELECT definition_json
 FROM report_definitions
 WHERE report_id = 'division_admissions_and_census'
@@ -79,7 +83,6 @@ LIMIT 1;
 
 ## Reminder
 
-Close the viewer (Harlequin or the Python process) **before reconnecting the
-`hin-poc` server** — only one process can hold the DuckDB file at a time. If a
-viewer is still open, the server will fail to start with a "database is locked"
-message.
+You no longer need to stop the server to browse the data. The one thing that
+still demands exclusive access is `python data/seed.py`, which rebuilds the
+warehouse read-write — close viewers and stop the server before reseeding.

@@ -17,30 +17,33 @@ import duckdb  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
 
 from server import tools  # noqa: E402
-from server.db import DB_PATH, get_connection  # noqa: E402
+from server.db import DB_PATH, get_connection, get_meta_connection  # noqa: E402
 
 mcp = FastMCP("hin-poc")
 
 
-def _acquire_lock_or_exit() -> None:
-    """Grab the read-write DB lock at startup, or exit with a clear message.
+def _open_databases_or_exit() -> None:
+    """Open both databases at startup, or exit with a clear message.
 
-    DuckDB takes an exclusive OS-level lock in read-write mode, so only one
-    hin-poc server can hold the file at a time. Without this check a second
-    (usually orphaned) server would still start, then throw on every tool call
-    because it can never open the database -- which looks to the client like the
-    tools hanging. Failing loudly at startup instead means a duplicate server
-    never sabotages a running session, and it warms the connection so the first
-    tool call is fast.
+    The warehouse is opened read-only, which takes a *shared* lock: several
+    servers, the replay runner, pytest and harlequin may all hold it at once.
+    Writes go to the SQLite metadata store, which allows one writer alongside
+    concurrent readers. So there is no exclusive lock to contend for, and no
+    reason to refuse a second server.
+
+    This runs at startup purely to fail loudly on a missing or unreadable
+    database -- otherwise the first tool call would throw and the client would
+    see it as the tools hanging -- and to warm both connections.
     """
     try:
-        get_connection(read_only=False)
-    except duckdb.IOException:
+        get_connection(read_only=True)
+        get_meta_connection()
+    except duckdb.IOException as exc:
         sys.exit(
-            f"hin-poc: cannot open {DB_PATH}: it is locked by another process.\n"
-            "Another hin-poc server (or the replay runner) already holds the "
-            "database read-write. Stop that process first -- only one server can "
-            "run at a time -- then start this one again."
+            f"hin-poc: cannot open {DB_PATH}: {exc}\n"
+            "The warehouse is opened read-only, so this usually means another "
+            "process holds it read-write -- most likely 'python data/seed.py' "
+            "mid-run. Wait for it to finish, then start the server again."
         )
     except FileNotFoundError as exc:
         sys.exit(f"hin-poc: {exc}")
@@ -87,5 +90,5 @@ def save_report_definition(
 
 
 if __name__ == "__main__":
-    _acquire_lock_or_exit()
+    _open_databases_or_exit()
     mcp.run()

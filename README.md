@@ -186,7 +186,8 @@ Anything the compiler cannot template (a table with no matching query, a
 the strategic render_report tool.
 
 Convenience builders live in `runner/render.py` (`build_table_html`,
-`build_value_span`) if you want to construct a parity-safe artifact directly.
+`build_value_span`, `build_reasoning_para`) if you want to construct a
+parity-safe artifact directly.
 
 To see the report *before* you save it, write the assembled body fragment to a
 file and run `python scripts/preview_artifact.py <fragment.html>`. It wraps the
@@ -194,6 +195,124 @@ fragment in the same base template the runner uses and opens the page in your
 browser, so you can inspect the original artifact — the tables and headline
 numbers the parity gate will lock — ahead of `save_report_definition`. It only
 reads the template, so it is safe to run while the server is up.
+
+## The v2 artifact contract: charts, tabs, and editorial
+
+The contract above is enough for a table-and-headline report. A chart-heavy,
+tabbed, narrative-rich dashboard needs more, so the compiler accepts a second set
+of markers. **The two contracts never mix**: use any v2 marker and the whole
+artifact takes the v2 path. Existing v1 artifacts are unaffected.
+
+Build v2 artifacts with the builders in `runner/render.py`: `build_island`,
+`build_value_span_v2`, `build_chart_div`, `build_bound_table`,
+`build_reasoning_block`, `build_editorial_block`, `build_tabs`.
+
+### Data islands
+
+Each query result is embedded once, as JSON, and everything else refers to it:
+
+```html
+<script type="application/json" data-result="race_quarters">[{"qtr":"Q1'25","gap":662}]</script>
+```
+
+The compiler replaces the body with `{{ race_quarters.rows | tojson }}`. The
+parity gate compares islands row by row and field by field, so an island is the
+unit of truth for a v2 report. Select only JSON-serializable columns — a raw
+`DATE` becomes an ISO string, and anything more exotic fails loudly at render.
+
+### The value grammar
+
+`data-value` takes a selector and an optional filter chain:
+
+| Reference | Row it picks |
+|---|---|
+| `result.field` | first row (as in v1) |
+| `result[3].field` | row 3 |
+| `result[first].field` / `result[last].field` | first / last row |
+| `result[col='val'].field` | the row where `col` equals `val` (`''` escapes a quote) |
+
+Filters, and only these: `thousands`, `signed`, `pct(n)`, `pp`, `round(n)`. They
+format; they never derive. Add `data-style="sign"` to colour the element by the
+value's sign (`growth` / `decline` / `flat`).
+
+```html
+<span data-value="race_quarters[last].gap_trend | signed | thousands" data-style="sign">-203</span>
+```
+
+### Charts and bound tables
+
+Both are declarations. The markup ships empty and `templates/runtime/charts_v1.js`
+fills it in the browser.
+
+```html
+<div id="raceChart" data-chart='{"type":"line","result":"race_quarters","x":"qtr",
+     "series":[{"field":"gap","label":"Gap","color":"#E75925"}]}'></div>
+
+<table data-result="race_quarters"
+       data-columns="qtr:Quarter, gap:Gap|thousands, gap_trend:Trend|signed|thousands|style:sign">
+  <thead><tr><th>Quarter</th><th>Gap</th><th>Trend</th></tr></thead>
+  <tbody></tbody>
+</table>
+```
+
+Chart types are `line`, `bar`, and `diverging_bar`; each accepts an optional
+`filter: {col: val}`. The `<tbody>` must be empty — the parity gate never runs
+JavaScript, so an authored row would be compared against nothing.
+
+**Computation stays in SQL.** The runtime draws and formats. If a chart needs a
+gap, a share percentage, a delta, a display string, or a particular row order,
+add a column or an `ORDER BY` to the query. Give every value-ordered `ORDER BY` a
+tiebreaker: ties come back in an arbitrary order, and the parity gate compares
+islands positionally.
+
+### Reasoning v2
+
+A step states a goal over named inputs instead of naming one aggregate:
+
+```html
+<p data-reasoning="race_story" data-goal="Explain how the gap moved."
+   data-inputs="race_quarters, esl_quarters[esl='ORTHOPEDICS']" data-max-sentences="3"></p>
+```
+
+### Editorial blocks
+
+Author-written prose that replays **verbatim** and is hashed, not recomputed. An
+optional `data-watch="valueref OP number"` is re-evaluated at every replay; when
+it fires, the runner prepends an amber staleness banner. An unresolvable watch
+banners the block rather than crashing the replay.
+
+```html
+<div data-editorial="thesis" data-authored-as-of="2025-06-30"
+     data-watch="kpi_summary[0].gap_now < 800"><strong>Thesis: …</strong></div>
+```
+
+### Theme and layout
+
+Set `final_artifact["layout"] = "tabbed-dashboard"` and
+`final_artifact["theme"] = "market-story-v1"`. Declare the tabs with
+`<nav data-tabs='[{"id":"race","label":"The Race"}]'></nav>` and mark each content
+element with `data-section="race"`; anything without a `data-section` (the KPI
+strip, the islands) renders above the tab bar. The theme CSS and the chart
+runtime are inlined, so a rendered report is one self-contained file.
+
+**A tabbed layout renders HTML only.** Markdown has no tabs, no SVG, and no
+runtime to fill the tables, so `formats` is forced to `["html"]` and a warning is
+recorded. `--formats md` on such a report prints that warning and skips.
+
+### The linter
+
+The compiler rejects `{{ }}` / `{% %}` in a submitted artifact (it writes the
+template; you supply the data) and non-whitelisted filters. It *warns* about a
+literal period label such as `Q1'25` in a heading or `.kpi-label`: that text is
+frozen the day it is written and lies at every later replay. Bind it to a result
+with `data-value` instead. A quarter inside a `data-value` span or an editorial
+block is fine.
+
+### Preview
+
+```bash
+python scripts/preview_artifact.py fragment.html --layout tabbed-dashboard
+```
 
 ## Regenerating a report
 
@@ -208,11 +327,15 @@ queries, runs the reasoning steps over the fresh results, renders every requeste
 format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`. Each step is
 recorded as a local observability span in `logs/spans.jsonl`.
 
-Note: the server holds an exclusive read-write lock on the DuckDB file. Because
-DuckDB does not allow a second process to open the same file while it is held
-read-write -- not even read-only -- **stop the MCP server before running the
-runner**. If the server is still up, the runner reports that the database is
-locked and asks you to stop it, rather than failing with a raw traceback.
+The runner can be run while the MCP server is up. `data/poc.duckdb` is only ever
+opened read-only, and a read-only DuckDB connection takes a shared lock that any
+number of processes may hold at once. The two tables the server writes -- the
+lineage log and the definition registry -- live in `data/poc_meta.sqlite`, which
+uses SQLite's WAL mode to admit one writer alongside concurrent readers.
+
+The one exception is `python data/seed.py`, which opens the warehouse read-write
+to rebuild it and therefore takes an exclusive lock. Nothing else may be attached
+while it runs.
 
 ## How it fits together
 
@@ -264,22 +387,47 @@ The definition stores SQL with the token `__REPORT_DATE__`. A literal such as
 literal more than ~366 days from the anchor, or one the caller marks `fixed` via
 `temporal_confirmations`, is left as-is and a warning is recorded.
 
+**Quarter boundaries get their own grain.** A quarter is not a fixed number of
+days, so rewriting `DATE '2021-04-01'` as a day offset drifts off the boundary as
+the report date moves. Confirm such a literal with
+`{"literal": "2021-04-01", "treatment": "relative_quarter"}` and it becomes
+`DATE_TRUNC('quarter', __REPORT_DATE__) - INTERVAL 48 MONTH`, which lands on a
+quarter start for every report date. Past quarter starts within a year are
+rewritten this way even unconfirmed; the current and future ones are not, since
+an exclusive upper bound is usually written as the day after the period ends.
+
 ## Tests
 
 ```
 pytest -q
 ```
 
+The suite seeds a fresh database once and pins `POC_REASONING=heuristic`, so it
+never needs the network even if your `.env` opts into the LLM engine.
+
 - `tests/test_temporal.py` covers literal detection, relative rewriting, fixed
-  passthrough, and the conservative fallback.
-- `tests/test_parity.py` covers a matching artifact passing, an edited cell
-  failing and being named, and markup-only differences passing.
+  passthrough, the conservative fallback, and the quarter-grain rewrite (including
+  a bind-and-execute round trip through DuckDB).
+- `tests/test_parity.py` / `tests/test_parity_v2.py` cover a matching artifact
+  passing, an edited cell (or island field) failing and being named, markup-only
+  differences passing, filter-aware value comparison, and the reference-completeness
+  checks that catch a chart pointing at a column that no longer exists.
+- `tests/test_artifact.py` covers the v2 parser: every selector and filter, the
+  source-offset spans, and the marker that separates v1 from v2.
+- `tests/test_compiler_v2.py` covers island/value/reasoning/editorial rewriting,
+  the linter, and a guard that a legacy artifact still distills exactly as before.
+- `tests/test_render_v2.py` covers the filters, `pick`, `tojson` over DuckDB
+  scalars, the tabbed layout, and a golden check on the legacy render.
 - `tests/test_bindings_reasoning.py` covers catalog loading, binding validation,
-  and the deterministic reasoning aggregations.
-- `tests/test_end_to_end.py` runs a scripted session in-process, saves, and
-  regenerates as of a different date, asserting the structure holds while the
-  data and the reasoning narrative change, and that Markdown comes from the same
-  rendering spec.
+  and both the v1 and v2 deterministic reasoning engines.
+- `tests/test_editorial.py` covers verbatim replay, the watch condition firing at
+  one replay date and not another, and unresolvable watches degrading to a banner.
+- `tests/test_marketshare_seed.py` asserts the seeded story: the gap narrows, HCA
+  gains share in 12 of 17 service lines, orthopedics loses share in a growing
+  market, and the new entrant arrives in the final three quarters.
+- `tests/test_end_to_end.py` and `tests/test_end_to_end_market.py` run scripted
+  sessions in-process, save, and regenerate as of a different date, asserting the
+  structure holds while the data, the KPIs, and the narrative change.
 
 ## Demo walkthrough (acceptance test)
 
@@ -308,6 +456,27 @@ With the server connected in Claude Code:
 Or run the whole thing non-interactively: `python scripts/demo_session.py` then
 `python runner/regenerate.py --report-id division_admissions_and_census --as-of 2025-05-15`.
 
+### The complex-report walkthrough
+
+`scripts/demo_market_story.py` captures the same way, but exercises the v2
+contract end to end: nine quarter-windowed queries, nine data islands, twelve
+charts, four runtime-bound tables, three goal-directed reasoning steps, two
+editorial blocks, and a six-tab layout.
+
+```bash
+python scripts/demo_market_story.py                                            # -> status: registered
+python runner/regenerate.py --report-id las_vegas_race_to_1 --as-of 2025-06-30  # banner present
+python runner/regenerate.py --report-id las_vegas_race_to_1 --as-of 2025-03-31  # banner absent
+python runner/regenerate.py --report-id las_vegas_race_to_1 --formats md        # warns, skips md
+```
+
+Open the two HTML files side by side. The tabs switch, the charts draw, and the
+window slides back one quarter: the race chart starts at `Q1'21` instead of
+`Q2'21`, the gap KPI reads 865 instead of 662, and the narrative is rewritten
+from the fresh numbers. The editorial prose is byte-identical in both — but only
+the 2025-06-30 render carries the amber staleness banner, because its watch
+condition (`gap_now < 800`) is true at 662 and false at 865.
+
 ## Project layout
 
 ```
@@ -316,7 +485,9 @@ server/main.py         FastMCP entry point
 server/tools.py        the four MCP tools
 server/intent_catalog.py   keyword intents for nl_query
 server/call_log.py     tool-call log keyed by conversation_id
+server/artifact.py     v2 artifact parser: islands, value grammar, source offsets
 server/compiler.py     distillation: session record -> four-part definition
+server/linter.py       rejects author-written templating; warns on frozen labels
 server/temporal.py     date literal detection and re-parameterization
 server/knowledge_graph.py  metric/ValueSet catalog and binding validation
 server/reasoning.py    ReasoningEngine protocol and deterministic engine
@@ -326,8 +497,15 @@ server/registry.py     definition registry (DuckDB tables)
 server/db.py           shared DB path, connection, and constants
 runner/regenerate.py   CLI replay runner
 runner/render.py       HTML and Markdown rendering shared with the parity gate
-templates/report_base.html.j2   base report template
-tests/                 temporal, parity, bindings/reasoning, end-to-end
+scripts/demo_session.py        scripted v1 capture
+scripts/demo_market_story.py   scripted v2 capture (the Las Vegas report)
+scripts/market_queries.py      the nine market-share queries; all derivation in SQL
+templates/report_base.html.j2       base report template
+templates/layouts/tabbed_dashboard.html.j2   the tabbed layout
+templates/themes/market_story_v1.css         theme inlined into the report
+templates/runtime/charts_v1.js               draws charts, fills tables, no derivation
+tests/                 temporal, parity, artifact, compiler, render, editorial,
+                       seed story, and both end-to-end walkthroughs
 ```
 
 Owner identity is out of scope for this POC.

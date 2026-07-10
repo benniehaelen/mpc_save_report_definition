@@ -6,9 +6,12 @@ venv/
 *.egg-info/
 .pytest_cache/
 
-# Local database (recreated by data/seed.py)
+# Local databases (recreated by data/seed.py)
 data/poc.duckdb
 data/poc.duckdb.wal
+data/poc_meta.sqlite
+data/poc_meta.sqlite-wal
+data/poc_meta.sqlite-shm
 
 # Generated reports and local observability
 reports/

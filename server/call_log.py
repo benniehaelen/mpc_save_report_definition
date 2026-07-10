@@ -3,19 +3,20 @@
 Only execute_sql writes here: the log is the lineage record that lets the
 compiler recover which named results a report was built from. Dry runs are not
 lineage and never touch this table.
+
+Lives in the SQLite metadata store (`server.db.META_PATH`), not the DuckDB
+warehouse, so that writing lineage never takes an exclusive lock on the analytic
+tables. See the module docstring in `server/db.py`.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-
-import duckdb
-
-from server.db import execute_params
+import sqlite3
 
 
 def log_call(
-    con: duckdb.DuckDBPyConnection,
+    con: sqlite3.Connection,
     conversation_id: str,
     tool_name: str,
     sql_text: str,
@@ -23,29 +24,26 @@ def log_call(
     row_count: int,
 ) -> int:
     """Append a row to tool_call_log and return the assigned call_id."""
-    next_id = con.execute(
-        "SELECT COALESCE(MAX(call_id), 0) + 1 FROM tool_call_log"
-    ).fetchone()[0]
-    execute_params(
-        con,
-        "INSERT INTO tool_call_log VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-            next_id,
+    cur = con.execute(
+        "INSERT INTO tool_call_log "
+        "(conversation_id, tool_name, sql_text, result_name, row_count, called_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
             conversation_id,
             tool_name,
             sql_text,
             result_name,
             row_count,
-            dt.datetime.now(),
-        ],
+            dt.datetime.now().isoformat(sep=" ", timespec="seconds"),
+        ),
     )
-    return next_id
+    con.commit()
+    return cur.lastrowid
 
 
-def fetch(con: duckdb.DuckDBPyConnection, conversation_id: str) -> list[dict]:
+def fetch(con: sqlite3.Connection, conversation_id: str) -> list[dict]:
     """Return this conversation's logged calls, oldest first."""
-    rows = execute_params(
-        con,
+    cur = con.execute(
         """
         SELECT call_id, conversation_id, tool_name, sql_text, result_name,
                row_count, called_at
@@ -53,7 +51,7 @@ def fetch(con: duckdb.DuckDBPyConnection, conversation_id: str) -> list[dict]:
         WHERE conversation_id = ?
         ORDER BY call_id
         """,
-        [conversation_id],
-    ).fetchall()
-    cols = [d[0] for d in con.description]
-    return [dict(zip(cols, row)) for row in rows]
+        (conversation_id,),
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]

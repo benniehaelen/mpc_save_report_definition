@@ -5,7 +5,7 @@ markup-only differences pass.
 from __future__ import annotations
 
 from server import call_log, compiler, parity, tools
-from server.db import ANCHOR_DATE, get_connection
+from server.db import ANCHOR_DATE, get_connection, get_meta_connection
 from runner import render
 
 _ADMISSIONS = (
@@ -36,8 +36,7 @@ def _build_session(conversation_id: str):
 
 
 def _distill(conversation_id: str, artifact: dict) -> dict:
-    con = get_connection()
-    log_rows = call_log.fetch(con, conversation_id)
+    log_rows = call_log.fetch(get_meta_connection(), conversation_id)
     return compiler.distill(
         report_name="Admissions",
         transcript=[],

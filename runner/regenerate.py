@@ -22,32 +22,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from runner import render  # noqa: E402
 from server import knowledge_graph, reasoning, registry  # noqa: E402
-from server.db import ANCHOR_DATE, PROJECT_ROOT, get_connection  # noqa: E402
+from server.db import (  # noqa: E402
+    ANCHOR_DATE,
+    PROJECT_ROOT,
+    get_connection,
+    get_meta_connection,
+)
 from server.observability import RunRecorder  # noqa: E402
 from server.parity import run_named_query  # noqa: E402
 
 _EXTENSIONS = {"html": "html", "md": "md"}
 
 
-def _open_readonly():
-    """Open the DuckDB file read-only for a replay run.
+def _make_stdout_printable() -> None:
+    """Never let the console's codepage kill a replay.
 
-    DuckDB takes an exclusive OS-level lock when a database is opened read-write,
-    so while the MCP server holds the file no other process can attach to it --
-    not even read-only. Translate that lock error into an actionable message
-    instead of a raw traceback.
+    The narrative is free text -- an LLM engine happily returns an arrow or an
+    em dash -- and a Windows console defaults to cp1252, which cannot encode
+    them. The report file is always written as UTF-8; only the progress echo
+    needs to degrade.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
+def _open_readonly():
+    """Open the DuckDB warehouse read-only for a replay run.
+
+    A read-only open takes a shared lock, so this succeeds while the MCP server
+    is running -- the server holds the warehouse read-only too. The only thing
+    that can refuse us is a read-write opener, which in this project is just
+    ``data/seed.py``.
     """
     try:
         return get_connection(read_only=True)
     except duckdb.IOException as exc:
         raise SystemExit(
-            "Cannot open the database: it is locked by another process, usually "
-            "the running MCP server (server/main.py). DuckDB does not allow a "
-            "second process to open the file while the server holds it "
-            "read-write, so stop the MCP server first, then run this command "
+            "Cannot open the database read-only: another process holds it "
+            "read-write. In this project only 'python data/seed.py' opens the "
+            "warehouse read-write; wait for it to finish, then run this command "
             "again.\n"
-            "  VS Code: run 'MCP: List Servers' from the Command Palette and "
-            "Stop 'hin-poc' (or Ctrl-C the terminal running it).\n"
             f"Underlying error: {exc}"
         ) from exc
 
@@ -65,6 +80,53 @@ def _list_reports(con) -> None:
         )
 
 
+_WATCH_OPS = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+}
+
+
+def _evaluate_watches(
+    definition: dict, results_by_name: dict, recorder: RunRecorder
+) -> dict[str, str]:
+    """Flag editorial blocks whose premise no longer holds.
+
+    A block replays verbatim -- that is the point -- so nothing else would notice
+    when the numbers move out from under the prose. An unresolvable watch is
+    itself a reason to flag the block, never a reason to crash the replay.
+    """
+    stale: dict[str, str] = {}
+    for block in definition.get("editorial_blocks") or []:
+        watch = block.get("watch")
+        if not watch:
+            continue
+        block_id = block["block_id"]
+        with recorder.span(f"watch:{block_id}") as span:
+            try:
+                result = results_by_name[watch["result"]]
+                literal = render.selector_literal(watch["selector"])
+                value = render.pick(result, literal, watch["field"])
+                fired = _WATCH_OPS[watch["op"]](float(value), float(watch["value"]))
+            except (KeyError, ValueError, TypeError, render.SelectorError) as exc:
+                span.set(resolved=False)
+                stale[block_id] = (
+                    f"Authored {block['authored_as_of']}; watch condition "
+                    f"'{watch['raw']}' can no longer be evaluated ({exc})."
+                )
+                continue
+            span.set(resolved=True, fired=fired, value=value)
+            if fired:
+                stale[block_id] = (
+                    f"Authored {block['authored_as_of']}; watch condition "
+                    f"'{watch['raw']}' is now true."
+                )
+    return stale
+
+
 def regenerate(
     report_id: str,
     version: int | None,
@@ -76,7 +138,7 @@ def regenerate(
     recorder = RunRecorder(report_id, version or 0, as_of)
 
     with recorder.span("fetch_definition"):
-        definition = registry.get(con, report_id, version)
+        definition = registry.get(get_meta_connection(), report_id, version)
     resolved_version = definition["definition_version"]
     recorder.version = resolved_version
 
@@ -111,16 +173,39 @@ def regenerate(
     for step_id, text in narratives.items():
         print(f"  reasoning {step_id}: {text}")
 
+    # Editorial prose replays verbatim, so it can go stale. Each watch condition
+    # is re-evaluated against the fresh numbers; the ones that fire get a banner.
+    stale_blocks = _evaluate_watches(definition, results_by_name, recorder)
+    for block_id, message in stale_blocks.items():
+        print(f"  editorial {block_id}: {message}")
+
     # Render and deliver every requested format.
-    requested = formats or definition["rendering_spec"].get("formats", ["html"])
+    spec = definition["rendering_spec"]
+    requested = formats or spec.get("formats", ["html"])
+    if spec.get("layout") == render.TABBED_LAYOUT and [
+        fmt for fmt in requested if fmt != "html"
+    ]:
+        for warning in definition.get("warnings", []):
+            if "markdown output skipped" in warning:
+                print(f"  {warning}")
+        requested = [fmt for fmt in requested if fmt == "html"]
+
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     for fmt in requested:
         if fmt not in _EXTENSIONS:
             print(f"  skipping unsupported format '{fmt}'")
             continue
-        with recorder.span(f"render:{fmt}"):
-            content = render.render(definition, results_by_name, narratives, fmt)
+        with recorder.span(f"render:{fmt}") as span:
+            span.set(charts=len(spec.get("charts") or []))
+            content = render.render(
+                definition,
+                results_by_name,
+                narratives,
+                fmt,
+                as_of=as_of,
+                stale_blocks=stale_blocks,
+            )
         out_path = out_dir / f"{report_id}_v{resolved_version}_{as_of}.{_EXTENSIONS[fmt]}"
         out_path.write_text(content, encoding="utf-8")
         outputs.append(out_path)
@@ -132,6 +217,7 @@ def regenerate(
 
 
 def main(argv: list[str] | None = None) -> None:
+    _make_stdout_printable()
     parser = argparse.ArgumentParser(description="Regenerate a saved report.")
     parser.add_argument("--report-id")
     parser.add_argument("--version", type=int, default=None)
@@ -143,9 +229,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--list", action="store_true", help="List registered reports.")
     args = parser.parse_args(argv)
 
-    con = _open_readonly()
     if args.list:
-        _list_reports(con)
+        # Listing reads only the registry, so it never opens the warehouse.
+        _list_reports(get_meta_connection())
         return
     if not args.report_id:
         parser.error("--report-id is required unless --list is given")

@@ -24,6 +24,20 @@ Heuristic rules:
      data-value numbers become expressions, and data-reasoning elements become
      narrative expressions. Anything that cannot be templated is reported as an
      unreplayable section rather than silently kept.
+
+There are two artifact contracts, and `distill` dispatches between them on the
+markers present (see `server/artifact.is_v2`):
+
+  * **v1** -- populated `<table data-result>` bodies, `data-value="result.field"`,
+    and `data-reasoning` + `data-over` steps. Rewritten with the regexes above.
+  * **v2** -- JSON data islands, a selector/filter value grammar, declarative
+    charts and bound tables, goal-directed reasoning, and verbatim editorial
+    blocks. Located with BeautifulSoup and rewritten by splicing the original
+    source at each node's offsets, so untouched markup stays byte-identical.
+
+The paths never mix. The v1 value regex would read `race[last].gap | thousands`
+as result `race[last]`, field `gap | thousands` -- corrupting a v2 artifact
+silently instead of rejecting it loudly.
 """
 
 from __future__ import annotations
@@ -31,7 +45,7 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from server import temporal
+from server import artifact, linter, temporal
 
 # Owner identity is out of scope for this POC.
 
@@ -240,6 +254,37 @@ def distill(
 ) -> dict:
     """Produce a candidate definition from the session record.
 
+    Dispatches on the artifact's markers. The two paths never mix: the v1
+    `data-value` regex reads `race[last].gap | thousands` as result
+    `race[last]`, field `gap | thousands`, so a v2 artifact that leaked into the
+    legacy path would be silently corrupted rather than loudly rejected.
+    """
+    html = final_artifact.get("content", "")
+    distiller = _distill_v2 if artifact.is_v2(html) else _distill_legacy
+    return distiller(
+        report_name,
+        transcript,
+        final_artifact,
+        log_rows,
+        anchor_date,
+        catalog,
+        temporal_confirmations,
+        attempt,
+    )
+
+
+def _distill_legacy(
+    report_name: str,
+    transcript: list[dict],
+    final_artifact: dict,
+    log_rows: list[dict],
+    anchor_date: str,
+    catalog: dict | None = None,
+    temporal_confirmations: list[dict] | None = None,
+    attempt: int = 1,
+) -> dict:
+    """The v1 contract: populated tables, `result.field` values, data-over steps.
+
     On retry attempts (attempt > 1) the matching is widened to include every
     logged query, not just those referenced by the artifact.
     """
@@ -287,6 +332,280 @@ def distill(
             "title": final_artifact.get("title", report_name),
             "template": template,
             "formats": formats,
+        },
+        "warnings": warnings,
+        "unreplayable_sections": unreplayable,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The v2 contract: data islands, a selector/filter value grammar, declarative
+# charts and tables, goal-directed reasoning, and verbatim editorial blocks.
+# ---------------------------------------------------------------------------
+
+_TABBED_LAYOUT = "tabbed-dashboard"
+
+_SINGLE_QUOTE = "'"
+
+
+def _jinja_string(text: str) -> str:
+    """A single-quoted Jinja string literal.
+
+    Always single-quoted: a `sign_class(...)` call gets spliced into a
+    `class="..."` attribute, where a double quote would end the attribute early.
+    """
+    escaped = text.replace("\\", "\\\\").replace(_SINGLE_QUOTE, "\\" + _SINGLE_QUOTE)
+    return f"{_SINGLE_QUOTE}{escaped}{_SINGLE_QUOTE}"
+
+
+def _selector_literal(selector: tuple) -> str:
+    if selector[0] == "index":
+        index = selector[1]
+        return _jinja_string("[last]" if index == -1 else f"[{index}]")
+    _kind, column, value = selector
+    doubled = value.replace(_SINGLE_QUOTE, _SINGLE_QUOTE * 2)
+    return _jinja_string(f"[{column}={_SINGLE_QUOTE}{doubled}{_SINGLE_QUOTE}]")
+
+
+def _pick_expr(ref) -> str:
+    return (
+        f"pick({ref.result}, {_selector_literal(ref.selector)}, "
+        f"{_jinja_string(ref.field)})"
+    )
+
+
+def _filter_suffix(filters) -> str:
+    parts = [f"{name}({args[0]})" if args else name for name, args in filters]
+    return "".join(f" | {part}" for part in parts)
+
+
+_CLASS_ATTR_RE = re.compile(r'\bclass="([^"]*)"')
+_OPEN_TAG_NAME_RE = re.compile(r"^<([a-zA-Z][\w:-]*)")
+
+
+def _with_sign_class(open_tag: str, expr: str) -> str:
+    """Merge sign_class(...) into the element's class list, never replacing it."""
+    injected = "{{ sign_class(" + expr + ") }}"
+    match = _CLASS_ATTR_RE.search(open_tag)
+    if match:
+        existing = match.group(1).strip()
+        merged = f"{existing} {injected}" if existing else injected
+        return open_tag[: match.start(1)] + merged + open_tag[match.end(1) :]
+    cut = _OPEN_TAG_NAME_RE.match(open_tag).end()
+    return f'{open_tag[:cut]} class="{injected}"{open_tag[cut:]}'
+
+
+def _apply_splices(html: str, splices: list[tuple[int, int, str]]) -> str:
+    """Replace [start, end) spans, right to left so earlier edits keep offsets valid.
+
+    Everything outside a splice is copied verbatim. That is what keeps untouched
+    markup byte-for-byte identical and the editorial hashes stable.
+    """
+    out = html
+    for start, end, replacement in sorted(splices, key=lambda s: s[0], reverse=True):
+        out = out[:start] + replacement + out[end:]
+    return out
+
+
+def _watch_to_json(watch: dict) -> dict:
+    """Flatten the parsed watch into something json.dumps can store."""
+    ref = watch["ref"]
+    return {
+        "raw": watch["raw"],
+        "result": ref.result,
+        "selector": list(ref.selector),
+        "field": ref.field,
+        "op": watch["op"],
+        "value": watch["value"],
+    }
+
+
+def _build_template_v2(
+    html: str,
+    model,
+    matched: set[str],
+    unreplayable: list[str],
+) -> tuple[str, list[dict], list[dict]]:
+    splices: list[tuple[int, int, str]] = []
+
+    for name, span in model.island_spans.items():
+        if name not in matched:
+            unreplayable.append(f"island '{name}' has no matching query; left static")
+            continue
+        splices.append(
+            (span.open_end, span.close_start, "{{ " + name + ".rows | tojson }}")
+        )
+
+    for ref in model.value_refs:
+        if ref.result not in matched:
+            unreplayable.append(f"value '{ref.raw}' has no matching query; left static")
+            continue
+        expr = _pick_expr(ref)
+        splices.append(
+            (
+                ref.span.open_end,
+                ref.span.close_start,
+                "{{ " + expr + _filter_suffix(ref.filters) + " }}",
+            )
+        )
+        if ref.style == "sign":
+            open_tag = html[ref.span.outer_start : ref.span.open_end]
+            splices.append(
+                (ref.span.outer_start, ref.span.open_end, _with_sign_class(open_tag, expr))
+            )
+
+    reasoning_steps: list[dict] = []
+    for step in model.reasoning_steps:
+        missing = sorted(
+            {
+                inp["result_name"]
+                for inp in step["inputs"]
+                if inp["result_name"] not in matched
+            }
+        )
+        if missing:
+            unreplayable.append(
+                f"reasoning '{step['step_id']}' references unmatched result(s) "
+                f"{', '.join(missing)}; left static"
+            )
+            continue
+        span = step["span"]
+        splices.append(
+            (span.open_end, span.close_start, "{{ reasoning['" + step["step_id"] + "'] }}")
+        )
+        reasoning_steps.append(
+            {
+                "step_id": step["step_id"],
+                "goal": step["goal"],
+                "inputs": step["inputs"],
+                "max_sentences": step["max_sentences"],
+                "style": step["style"],
+            }
+        )
+
+    for step in model.legacy_reasoning:
+        unreplayable.append(
+            f"reasoning '{step['step_id']}' uses the v1 data-over form inside a v2 "
+            "artifact; left static"
+        )
+
+    # Editorial prose is never rewritten -- that is the point of the content class.
+    # A banner slot goes immediately before it, empty unless the runner's watch
+    # evaluation flags the block at replay time.
+    editorial_blocks: list[dict] = []
+    for block in model.editorial_blocks:
+        start = block["span"].outer_start
+        splices.append(
+            (start, start, "{{ editorial_banner('" + block["block_id"] + "') }}")
+        )
+        editorial_blocks.append(
+            {
+                "block_id": block["block_id"],
+                "html_sha256": block["html_sha256"],
+                "authored_as_of": block["authored_as_of"],
+                "watch": _watch_to_json(block["watch"]) if block["watch"] else None,
+            }
+        )
+
+    return _apply_splices(html, splices), reasoning_steps, editorial_blocks
+
+
+def _field_pairs_v2(model, matched: set[str]) -> list[tuple[str, str]]:
+    """Every island column, plus every field a data-value names.
+
+    Bound-table headers are excluded on purpose: they are display labels
+    ("Gap to #1"), not field names, and would bind to nothing.
+    """
+    pairs: list[tuple[str, str]] = []
+
+    def add(result_name: str, field: str) -> None:
+        pair = (result_name, field)
+        if result_name in matched and field and pair not in pairs:
+            pairs.append(pair)
+
+    for name, rows in model.islands.items():
+        if rows:
+            for column in rows[0]:
+                add(name, column)
+    for ref in model.value_refs:
+        add(ref.result, ref.field)
+    return pairs
+
+
+def _distill_v2(
+    report_name: str,
+    transcript: list[dict],
+    final_artifact: dict,
+    log_rows: list[dict],
+    anchor_date: str,
+    catalog: dict | None = None,
+    temporal_confirmations: list[dict] | None = None,
+    attempt: int = 1,
+) -> dict:
+    """The v2 contract. Same four-part definition, plus editorial blocks."""
+    catalog = catalog or _EMPTY_CATALOG
+    html = final_artifact.get("content", "")
+    latest = _latest_by_name(log_rows)
+
+    model = artifact.parse(html)
+    unreplayable: list[str] = list(model.problems)
+    lint_unreplayable, warnings = linter.lint(html)
+    unreplayable.extend(lint_unreplayable)
+
+    referenced = model.referenced_names()
+    for name in referenced:
+        if name not in latest:
+            unreplayable.append(
+                f"reference '{name}' has no matching query in the tool-call log"
+            )
+
+    included = [name for name in referenced if name in latest]
+    if attempt > 1:
+        for name in latest:
+            if name not in included:
+                included.append(name)
+    matched = set(included)
+
+    parameterized_sql: list[dict] = []
+    for name in included:
+        new_sql, sql_warnings = temporal.reparameterize(
+            latest[name], anchor_date, temporal_confirmations
+        )
+        warnings.extend(sql_warnings)
+        parameterized_sql.append({"result_name": name, "sql": new_sql})
+
+    metric_bindings = _metric_bindings(_field_pairs_v2(model, matched), catalog)
+    template, reasoning_steps, editorial_blocks = _build_template_v2(
+        html, model, matched, unreplayable
+    )
+
+    formats = [fmt.lower() for fmt in final_artifact.get("formats", ["html"])]
+    if "html" not in formats:
+        formats = ["html"] + formats
+    layout = final_artifact.get("layout")
+    if layout == _TABBED_LAYOUT and formats != ["html"]:
+        # Markdown has no tabs, no SVG, and no runtime to fill the bound tables.
+        warnings.append(
+            "layout 'tabbed-dashboard' renders HTML only; markdown output skipped"
+        )
+        formats = ["html"]
+
+    return {
+        "report_name": report_name,
+        "anchor_date": anchor_date,
+        "parameterized_sql": parameterized_sql,
+        "metric_bindings": metric_bindings,
+        "reasoning_steps": reasoning_steps,
+        "editorial_blocks": editorial_blocks,
+        "rendering_spec": {
+            "title": final_artifact.get("title", report_name),
+            "template": template,
+            "formats": formats,
+            "layout": layout,
+            "theme": final_artifact.get("theme"),
+            "sections": model.tabs or [],
+            "charts": model.charts,
+            "tables": model.bound_tables,
         },
         "warnings": warnings,
         "unreplayable_sections": unreplayable,

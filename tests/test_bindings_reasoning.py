@@ -90,3 +90,112 @@ def test_llm_engine_falls_back_without_sdk(monkeypatch):
     llm = reasoning.AnthropicReasoningEngine()
     heuristic = reasoning.HeuristicReasoningEngine()
     assert llm.run(steps, _RESULTS) == heuristic.run(steps, _RESULTS)
+
+
+# --- reasoning v2 --------------------------------------------------------
+#
+# A v2 step states a goal over named inputs instead of naming one aggregate.
+# The heuristic engine describes those inputs deterministically so the default
+# path never needs a network.
+
+_V2_RESULTS = {
+    "race": {
+        "columns": ["qtr", "gap"],
+        "rows": [
+            {"qtr": "Q1'24", "gap": 1200},
+            {"qtr": "Q2'24", "gap": 900},
+            {"qtr": "Q3'24", "gap": 600},
+        ],
+    },
+    "esl": {
+        "columns": ["esl", "share_change_pp"],
+        "rows": [
+            {"esl": "ORTHOPEDICS", "share_change_pp": -2.7},
+            {"esl": "GENERAL SURGERY", "share_change_pp": 2.3},
+        ],
+    },
+}
+
+
+def _v2_step(**overrides):
+    step = {
+        "step_id": "s",
+        "goal": "Explain the competitive picture.",
+        "inputs": [{"result_name": "race", "filter": None}],
+        "max_sentences": 3,
+        "style": None,
+    }
+    step.update(overrides)
+    return step
+
+
+def test_reasoning_v2_describes_each_input():
+    engine = reasoning.HeuristicReasoningEngine()
+    step = _v2_step(
+        inputs=[
+            {"result_name": "race", "filter": None},
+            {"result_name": "esl", "filter": None},
+        ]
+    )
+    out = engine.run([step], _V2_RESULTS)["s"]
+    assert out == (
+        "race: 3 rows; gap ranges 600–1200 (avg 900). "
+        "esl: 2 rows; share_change_pp ranges -2.7–2.3 (avg -0.2)."
+    )
+
+
+def test_reasoning_v2_respects_filters():
+    engine = reasoning.HeuristicReasoningEngine()
+    step = _v2_step(inputs=[{"result_name": "race", "filter": {"col": "qtr", "val": "Q2'24"}}])
+    out = engine.run([step], _V2_RESULTS)["s"]
+    assert out == "race: 1 rows; gap ranges 900–900 (avg 900)."
+
+
+def test_reasoning_v2_respects_max_sentences():
+    engine = reasoning.HeuristicReasoningEngine()
+    step = _v2_step(
+        max_sentences=1,
+        inputs=[
+            {"result_name": "race", "filter": None},
+            {"result_name": "esl", "filter": None},
+        ],
+    )
+    out = engine.run([step], _V2_RESULTS)["s"]
+    assert out.count(".") == 1
+    assert "esl:" not in out
+
+
+def test_reasoning_v2_is_deterministic():
+    engine = reasoning.HeuristicReasoningEngine()
+    step = _v2_step()
+    assert engine.run([step], _V2_RESULTS) == engine.run([step], _V2_RESULTS)
+
+
+def test_reasoning_v2_degrades_cleanly_on_missing_and_unmatched_data():
+    engine = reasoning.HeuristicReasoningEngine()
+    missing = _v2_step(step_id="a", inputs=[{"result_name": "nope", "filter": None}])
+    unmatched = _v2_step(
+        step_id="b",
+        inputs=[{"result_name": "race", "filter": {"col": "qtr", "val": "Q9'99"}}],
+    )
+    out = engine.run([missing, unmatched], _V2_RESULTS)
+    assert out["a"] == "nope: no data available for this period."
+    assert out["b"] == "race: no rows match the requested filter."
+
+
+def test_mixed_v1_and_v2_steps_run_together_and_v1_is_unchanged():
+    engine = reasoning.HeuristicReasoningEngine()
+    v1 = {"step_id": "old", "result_name": "t", "field": "val", "agg": "max"}
+    v2 = _v2_step(step_id="new")
+    out = engine.run([v1, v2], {**_RESULTS, **_V2_RESULTS})
+    assert out["old"] == "Across 3 rows, the highest val is 7 at B."
+    assert out["new"].startswith("race: 3 rows;")
+
+
+def test_llm_engine_v2_falls_back_to_the_v2_heuristic_without_sdk(monkeypatch):
+    """The per-step fallback must target _one_v2; a v2 step has no result_name."""
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    step = _v2_step()
+    llm = reasoning.AnthropicReasoningEngine()
+    heuristic = reasoning.HeuristicReasoningEngine()
+    assert llm.run([step], _V2_RESULTS) == heuristic.run([step], _V2_RESULTS)

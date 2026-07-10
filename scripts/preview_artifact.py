@@ -68,6 +68,55 @@ def _title_from_fragment(fragment: str) -> str:
     return "Report preview"
 
 
+def _preview_v2(fragment: str, title: str, theme: str, parser) -> str:
+    """Preview a v2 artifact under its real layout, theme, and chart runtime.
+
+    The fragment still holds the numbers the client put there, so nothing needs
+    the database: this renders the artifact as submitted, not as replayed.
+    """
+    from runner import render  # noqa: PLC0415 - keep the no-layout path dependency-free
+    from server import artifact
+
+    model = artifact.parse(fragment)
+    for problem in model.problems:
+        print(f"warning: {problem}", file=sys.stderr)
+
+    # Tell the author what was actually found. A preview that silently renders an
+    # empty shell is worse than no preview: it looks like the layout is broken
+    # when the real problem is upstream, in whatever wrote the fragment.
+    print(
+        f"  parsed: {len(model.islands)} islands, {len(model.charts)} charts, "
+        f"{len(model.bound_tables)} bound tables, "
+        f"{len(model.reasoning_steps)} reasoning blocks, "
+        f"{len(model.editorial_blocks)} editorial blocks, "
+        f"{len(model.tabs or [])} tabs"
+    )
+    if not model.islands:
+        print(
+            "warning: no data islands found. A v2 artifact carries its results as\n"
+            '         <script type="application/json" data-result="...">...</script>.\n'
+            "         Charts and bound tables will render empty without them.",
+            file=sys.stderr,
+        )
+
+    sections = model.tabs or []
+    prelude, panels = render._split_sections(fragment, sections)
+    try:
+        theme_css = render._read_asset("themes", theme.replace("-", "_"), ".css")
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+    return render._env.get_template("layouts/tabbed_dashboard.html.j2").render(
+        title=title,
+        prelude=prelude,
+        sections=sections,
+        panels=panels,
+        theme_css=theme_css,
+        runtime_js=render._read_asset("runtime", "charts_v1", ".js"),
+        as_of=None,
+        chart_count=len(model.charts),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -85,18 +134,46 @@ def main() -> None:
         action="store_true",
         help="Write the file but do not open it in a browser.",
     )
+    parser.add_argument(
+        "--layout",
+        help="Layout to preview under, e.g. 'tabbed-dashboard'. A v2 artifact "
+        "previewed without this shows no charts, tabs, or theme.",
+    )
+    parser.add_argument(
+        "--theme",
+        default="market_story_v1",
+        help="Theme CSS to inline when --layout is given.",
+    )
     args = parser.parse_args()
 
     if not (TEMPLATES_DIR / "report_base.html.j2").exists():
         parser.error(f"base template not found under {TEMPLATES_DIR}")
 
-    fragment = (
-        sys.stdin.read()
-        if args.fragment == "-"
-        else Path(args.fragment).read_text(encoding="utf-8")
-    )
+    if args.fragment == "-":
+        fragment = sys.stdin.read()
+        source = "stdin"
+    else:
+        path = Path(args.fragment)
+        if not path.exists():
+            parser.error(f"fragment not found: {path}")
+        fragment = path.read_text(encoding="utf-8")
+        source = str(path)
+
+    # An empty fragment previews as an empty page, which reads like a broken
+    # layout. It is almost always a failed write upstream -- the agent created the
+    # file but never filled it. Say so instead of rendering nothing.
+    if not fragment.strip():
+        parser.error(
+            f"{source} is empty ({len(fragment)} bytes). Nothing to preview.\n"
+            "The artifact content was never written to it -- ask the client to "
+            "write the fragment again, then check the file size before previewing."
+        )
+
     title = args.title or _title_from_fragment(fragment)
-    page = _PREVIEW_PAGE.format(title=title, body=fragment)
+    if args.layout:
+        page = _preview_v2(fragment, title, args.theme, parser)
+    else:
+        page = _PREVIEW_PAGE.format(title=title, body=fragment)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

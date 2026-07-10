@@ -86,18 +86,62 @@ The runner binds `__REPORT_DATE__` to `--as-of` (default: the anchor date
 2025-06-30), executes the named queries, reasons over the fresh results, renders
 each requested format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`.
 
+## The v2 contract (charts, tabs, editorial)
+
+The contract above is enough for a table-and-headline report. For a chart-heavy,
+tabbed dashboard, use the v2 markers instead. **The two never mix**: any v2 marker
+puts the whole artifact on the v2 path. Build them with the `runner/render.py`
+builders (`build_island`, `build_value_span_v2`, `build_chart_div`,
+`build_bound_table`, `build_reasoning_block`, `build_editorial_block`,
+`build_tabs`). See `README.md` for the full grammar and
+`scripts/demo_market_story.py` for a worked example.
+
+- **Data islands** carry the results:
+  `<script type="application/json" data-result="race_quarters">[…]</script>`.
+  Select only JSON-serializable columns. The parity gate compares islands row by
+  row and field by field.
+- **`data-value`** takes a selector and a filter chain:
+  `race_quarters[last].gap_trend | signed | thousands`. Selectors are `.`, `[3]`,
+  `[first]`, `[last]`, `[col='val']`. Filters are exactly `thousands`, `signed`,
+  `pct(n)`, `pp`, `round(n)`. Add `data-style="sign"` to colour by sign.
+- **Charts** (`data-chart='{"type":"line","result":…}'`, types `line` / `bar` /
+  `diverging_bar`) and **bound tables**
+  (`<table data-result data-columns="field:Header|filter|style:sign">` with an
+  empty `<tbody>`) ship as empty markup that `templates/runtime/charts_v1.js`
+  fills in the browser.
+- **Reasoning v2** states a goal:
+  `<p data-reasoning="id" data-goal="…" data-inputs="a, b[col='v']" data-max-sentences="3"></p>`.
+- **Editorial blocks** (`data-editorial`, `data-authored-as-of`, optional
+  `data-watch="ref OP number"`) replay verbatim and are hashed. A watch that fires
+  at replay prepends a staleness banner.
+- Set `layout: "tabbed-dashboard"` and `theme: "market-story-v1"` on
+  `final_artifact`, declare tabs with `<nav data-tabs='[…]'>`, and mark content
+  with `data-section`. **A tabbed layout renders HTML only**; `formats` is forced
+  to `["html"]`.
+- The compiler **rejects** `{{ }}` / `{% %}` in your artifact and non-whitelisted
+  filters, and **warns** about a literal `Q1'25` in a heading or `.kpi-label` —
+  bind it to a result instead, or it will lie at the next replay.
+
 ## Repository conventions
 
 - The core path is **offline and LLM-free**: no GCP, no network calls, no LLM
   calls. Keep it that way. LLM-backed reasoning is opt-in behind the
   `ReasoningEngine` protocol (`server/reasoning.py`) and off by default.
+- **Computation stays in SQL.** The chart runtime draws and formats; it never
+  derives. If a chart needs a gap, a share, a delta, a display string, or a
+  particular row order, add a column or an `ORDER BY` to the query — and give
+  every value-ordered `ORDER BY` a tiebreaker, since ties come back in an
+  arbitrary order and the parity gate compares islands positionally.
 - Data is synthetic, seeded with a fixed random seed and anchored at **2025-06-30**
   so parity results are stable. Run `python data/seed.py` (idempotent) before use.
 - The compiler (`Distiller`) and reasoning engine (`ReasoningEngine`) are
   deterministic implementations behind protocols. Prefer swapping an implementation
   behind the protocol over editing call sites.
-- The server holds an exclusive read-write lock on the DuckDB file. DuckDB will
-  not let a second process open the same file while it is held read-write, so
-  **stop the MCP server before running `regenerate.py`** (it now reports a clear
-  "database is locked" message if you forget).
+- Storage is split: `data/poc.duckdb` (the warehouse, opened **read-only** by
+  everyone, so processes coexist) and `data/poc_meta.sqlite` (the lineage log and
+  definition registry, SQLite in WAL mode). `regenerate.py` runs fine while the
+  server is up. Never move a writable table into the DuckDB file -- a read-write
+  open takes an exclusive lock that shuts out every other process.
+- `python data/seed.py` is the exception: it opens the warehouse read-write, so
+  nothing else may be attached while it runs.
 - Run the tests with `pytest -q` before committing changes to server or runner code.

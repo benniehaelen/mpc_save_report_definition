@@ -3,11 +3,14 @@
     List (or stop) running hin-poc MCP server processes.
 
 .DESCRIPTION
-    Only one hin-poc server can run at a time: it holds an exclusive read-write
-    lock on data/poc.duckdb. Orphaned servers left over from previous sessions
-    keep that lock and make every tool call (nl_query, execute_sql, ...) fail,
-    which looks like the tools hanging. Use this to see what is running and, with
-    -Kill, stop them so a single clean server can take the lock.
+    Servers no longer contend for a database lock: the warehouse is opened
+    read-only (a shared lock) and writes go to the SQLite metadata store, which
+    allows concurrent writers. Several servers can now run side by side without
+    breaking each other's tool calls.
+
+    Orphaned servers left over from previous sessions are still worth clearing
+    out -- they hold connections and file handles, and it is rarely what you
+    meant to have running. Use this to see what is up and, with -Kill, stop them.
 
 .EXAMPLE
     powershell -File scripts/servers.ps1
@@ -26,7 +29,7 @@ $servers = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -match 'mpc_save_report_definition' -and $_.CommandLine -match 'main\.py' })
 
 if (-not $servers) {
-    Write-Host "No hin-poc servers running. The database lock is free." -ForegroundColor Green
+    Write-Host "No hin-poc servers running." -ForegroundColor Green
     exit 0
 }
 
@@ -45,9 +48,9 @@ if ($Kill) {
         Write-Host ("Stopping PID {0}" -f $s.ProcessId) -ForegroundColor Yellow
         Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    Write-Host "Done. Reconnect the hin-poc server in your client to start one clean instance." -ForegroundColor Green
+    Write-Host "Done. Reconnect the hin-poc server in your client to start a clean instance." -ForegroundColor Green
 } elseif ($n -gt 1) {
-    Write-Host ("{0} servers running -- that's the problem. Re-run with -Kill to stop them all." -f $n) -ForegroundColor Red
+    Write-Host ("{0} servers running. They no longer lock each other out, but this is probably orphans -- use -Kill to clear them." -f $n) -ForegroundColor Yellow
 } else {
-    Write-Host "1 server running (expected). Re-run with -Kill only if the tools are stuck." -ForegroundColor Cyan
+    Write-Host "1 server running (expected)." -ForegroundColor Cyan
 }

@@ -7,6 +7,10 @@ dependencies = [
     "fastmcp>=2.0",
     "duckdb>=1.0",
     "jinja2>=3.1",
+    # Parses the v2 artifact contract. The compiler locates nodes with bs4 and
+    # splices the original source at their offsets, so it needs the source-position
+    # tracking html.parser provides (bs4 >= 4.8.1).
+    "beautifulsoup4>=4.8.1",
 ]
 
 [project.optional-dependencies]

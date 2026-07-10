@@ -1,0 +1,57 @@
+{#
+  The tabbed-dashboard layout.
+
+  The body template renders one flat fragment; this wraps it. Elements carrying a
+  `data-section` are grouped into panels by `_split_sections`; everything else
+  (the KPI strip, the data islands) stays in `prelude`, above the tab bar, where
+  it is visible from every panel and reachable by the runtime.
+
+  Theme CSS and the runtime are inlined rather than linked, so a rendered report
+  is a single self-contained file you can open straight from `reports/`.
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  {# Inlined verbatim: autoescaping this would corrupt the CSS and the JS below. #}
+  <style>{{ theme_css | safe }}</style>
+</head>
+<body>
+  <div class="header">
+    <h1>{{ title }}</h1>
+    <div class="subtitle">Regenerated{% if as_of %} as of {{ as_of }}{% endif %}</div>
+  </div>
+
+  <div class="container">
+    {{ prelude | safe }}
+
+    {% if sections %}
+    <div class="tabs" role="tablist" aria-label="Dashboard sections">
+      {% for section in sections %}
+      <button class="tab" role="tab" id="tab-{{ section.id }}"
+              aria-controls="panel-{{ section.id }}"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              tabindex="{{ '0' if loop.first else '-1' }}">{{ section.label }}</button>
+      {% endfor %}
+    </div>
+
+    {% for section in sections %}
+    <div id="panel-{{ section.id }}" class="panel{{ ' active' if loop.first else '' }}"
+         role="tabpanel" aria-labelledby="tab-{{ section.id }}">
+      {{ panels[section.id] | safe }}
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  <footer>
+    {{ title }}
+    {%- if as_of %} &middot; as of {{ as_of }}{% endif %}
+    {%- if chart_count %} &middot; {{ chart_count }} charts{% endif %}
+    &middot; regenerated from a saved report definition
+  </footer>
+
+  <script>{{ runtime_js | safe }}</script>
+</body>
+</html>
