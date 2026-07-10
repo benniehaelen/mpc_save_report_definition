@@ -344,8 +344,60 @@ def test_a_valid_watch_survives(report, session):
     plan = {**extractor.empty_plan(), "narrative": [
         {"block_id": "b0", "tier": "editorial", "watch": "race[last].uhs < 800"}
     ]}
-    clean, _ = extractor.validate_plan(plan, report, session)
+    clean, warnings = extractor.validate_plan(plan, report, session)
     assert clean["narrative"][0]["watch"] == "race[last].uhs < 800"
+    assert not warnings
+
+
+def test_a_proposed_watch_on_a_non_editorial_block_is_dropped(report, session):
+    """A model proposal is dropped with a warning; only a human override errors."""
+    plan = {**extractor.empty_plan(), "narrative": [
+        {"block_id": "b0", "tier": "analytical", "goal": "explain",
+         "watch": "race[last].uhs < 800"}
+    ]}
+    clean, warnings = extractor.validate_plan(plan, report, session)
+    assert "watch" not in clean["narrative"][0]
+    assert clean["narrative"][0]["tier"] == "analytical"  # the tier itself survives
+    assert any("not 'editorial'" in w for w in warnings)
+
+
+def test_a_watch_survives_the_tier_falling_back_to_editorial(report, session):
+    """analytical-without-a-goal falls back to editorial, which a watch is allowed on."""
+    plan = {**extractor.empty_plan(), "narrative": [
+        {"block_id": "b0", "tier": "analytical", "watch": "race[last].uhs < 800"}
+    ]}
+    clean, warnings = extractor.validate_plan(plan, report, session)
+    assert clean["narrative"][0]["tier"] == "editorial"
+    assert clean["narrative"][0]["watch"] == "race[last].uhs < 800"
+
+
+def test_the_model_can_propose_a_watch(monkeypatch, report, session):
+    reply = json.dumps({"narrative": [
+        {"block_id": "b0", "tier": "editorial", "watch": "race[0].hca < 500"}
+    ]})
+    module, _ = _fake_anthropic([reply])
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+    plan = extractor.AnthropicExtractor().propose(_HTML, report, session)
+    clean, warnings = extractor.validate_plan(plan, report, session)
+    assert clean["narrative"][0]["watch"] == "race[0].hca < 500"
+
+
+def test_a_model_proposed_watch_with_bad_grammar_is_dropped(monkeypatch, report, session):
+    reply = json.dumps({"narrative": [
+        {"block_id": "b0", "tier": "editorial", "watch": "race[0].hca <"}
+    ]})
+    module, _ = _fake_anthropic([reply])
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+    plan = extractor.AnthropicExtractor().propose(_HTML, report, session)
+    clean, warnings = extractor.validate_plan(plan, report, session)
+    assert "watch" not in clean["narrative"][0]
+    assert any("watch on b0" in w for w in warnings)
+
+
+def test_the_system_prompt_offers_watch_conservatively():
+    """The model must not invent a threshold the author never wrote."""
+    assert '"watch": str?' in extractor._SYSTEM
+    assert "Never invent a threshold" in extractor._SYSTEM
 
 
 def test_malformed_tabs_are_dropped(report, session):

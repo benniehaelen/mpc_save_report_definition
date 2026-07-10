@@ -7,6 +7,7 @@ DuckDB connection from server.db so tests can call them in-process.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 
@@ -180,6 +181,7 @@ def _extraction_summary(plan: dict, report) -> dict:
                 "tier": n.get("tier", "editorial"),
                 "excerpt": n.get("excerpt", ""),
                 **({"goal": n["goal"]} if n.get("goal") else {}),
+                **({"watch": n["watch"]} if n.get("watch") else {}),
             }
             for n in plan.get("narrative", [])
         ],
@@ -189,22 +191,71 @@ def _extraction_summary(plan: dict, report) -> dict:
     }
 
 
-def _apply_overrides(plan: dict, confirmations: list[dict]) -> dict:
-    """Fold the client's per-item decisions into the cached plan."""
+def _apply_overrides(plan: dict, confirmations: list[dict]) -> tuple[dict, list[str]]:
+    """Fold the client's per-item decisions into the cached plan.
+
+    Returns ``(plan, errors)``. An override is an explicit human decision, so a bad
+    one **fails the call** rather than being dropped with a warning. Dropping is the
+    convention for what a model *proposed*; it would be wrong for what a person
+    *asked for*, because the save would then quietly register something other than
+    what was requested.
+    """
     plan = json.loads(json.dumps(plan))  # deep copy; the cached plan stays pristine
     accept_all = any(c.get("accept_all") for c in confirmations)
+    errors: list[str] = []
+
+    narrative = plan.get("narrative", [])
+    known_blocks = {b["block_id"] for b in narrative}
 
     accepted: set[str] = set()
     rejected: set[str] = set()
     for entry in confirmations:
         if "derived" in entry:
             (accepted if entry.get("accept", True) else rejected).add(entry["derived"])
-        if "block_id" in entry and entry.get("tier"):
-            for block in plan.get("narrative", []):
-                if block["block_id"] == entry["block_id"]:
-                    block["tier"] = entry["tier"]
-                    if entry.get("goal"):
-                        block["goal"] = entry["goal"]
+        if "block_id" not in entry:
+            continue
+
+        block_id = entry["block_id"]
+        if block_id not in known_blocks:
+            errors.append(f"unknown block_id {block_id!r} in structure_confirmations")
+            continue
+
+        for block in narrative:
+            if block["block_id"] != block_id:
+                continue
+            if entry.get("tier"):
+                block["tier"] = entry["tier"]
+            if entry.get("goal"):
+                block["goal"] = entry["goal"]
+            if entry.get("authored_as_of"):
+                authored = entry["authored_as_of"]
+                try:
+                    dt.date.fromisoformat(str(authored))
+                except ValueError:
+                    errors.append(
+                        f"authored_as_of override on {block_id!r}: "
+                        f"{authored!r} is not an ISO date (YYYY-MM-DD)"
+                    )
+                else:
+                    block["authored_as_of"] = authored
+            if entry.get("watch"):
+                try:
+                    artifact.parse_watch(entry["watch"])
+                except artifact.GrammarError as exc:
+                    errors.append(f"watch override on {block_id!r}: {exc}")
+                else:
+                    block["watch"] = entry["watch"]
+
+    # A watch marks frozen judgment against a number. An analytical block is
+    # regenerated from fresh data at every replay, so a staleness watch on one
+    # would be watching prose that no longer exists.
+    for block in narrative:
+        if block.get("watch") and block.get("tier", "editorial") != "editorial":
+            errors.append(
+                f"watch on {block['block_id']!r} requires tier 'editorial' "
+                f"(it is {block.get('tier')!r}; a watch marks frozen judgment, and "
+                "analytical blocks are regenerated anyway)"
+            )
 
     proposed = plan.get("derived_queries", [])
     if accept_all:
@@ -221,7 +272,7 @@ def _apply_overrides(plan: dict, confirmations: list[dict]) -> dict:
         plan["islands"] = [i for i in plan.get("islands", []) if i["result_name"] not in dropped]
         plan["values"] = [v for v in plan.get("values", []) if v.get("result") not in dropped]
         plan["charts"] = [c for c in plan.get("charts", []) if c.get("result") not in dropped]
-    return plan
+    return plan, errors
 
 
 def _normalize_free_form(
@@ -236,6 +287,12 @@ def _normalize_free_form(
     contains inferences the client has not yet confirmed, and nothing may be
     registered on inference alone. ``token`` names the confirmed plan, so the
     caller can mark it consumed once a definition is registered.
+
+    ``structure_confirmations`` may arrive **without** a token. That is how a
+    fingerprint-clean page attaches an editorial watch: there is nothing to
+    confirm, and a watch is a directive rather than an inference, so it applies in
+    the same single call. If the plan turns out to hold an inference after all, the
+    call is refused and the client is told to fetch a token first.
     """
     meta = get_meta_connection()
     html = final_artifact.get("content", "")
@@ -249,20 +306,10 @@ def _normalize_free_form(
         meta=meta,
     )
     token: str | None = None
-
     if structure_confirmations:
         token = next((c.get("token") for c in structure_confirmations if c.get("token")), None)
-        if not token:
-            return (
-                {
-                    "status": "invalid_structure_confirmation",
-                    "error": "structure_confirmations must carry the confirmation_token "
-                    "returned by the first save call",
-                },
-                final_artifact,
-                [],
-                None,
-            )
+
+    if token:
         cached = extraction_cache.load(meta, token)
         if cached is None or cached["conversation_id"] != conversation_id:
             return (
@@ -307,11 +354,40 @@ def _normalize_free_form(
             )
         plan = cached["plan"]
         warnings = list(plan.get("_warnings", []))
-        plan = _apply_overrides(plan, structure_confirmations)
+        plan, override_errors = _apply_overrides(plan, structure_confirmations)
+        if override_errors:
+            # The token stays unspent: it is the client's entry that is wrong, not
+            # the plan they were shown. Fix the entry and retry with the same token.
+            return (
+                {
+                    "status": "invalid_structure_confirmation",
+                    "error": "; ".join(override_errors),
+                },
+                final_artifact,
+                [],
+                None,
+            )
     else:
         proposed = extractor.get_extractor().propose(html, report, session)
         plan, warnings = extractor.validate_plan(proposed, report, session)
+
         if extractor.has_inferences(plan):
+            if structure_confirmations:
+                # Overrides without a token are fine, but only when there is nothing
+                # to confirm. Something here was inferred, and inference is exactly
+                # what a token exists to get a human to look at.
+                return (
+                    {
+                        "status": "invalid_structure_confirmation",
+                        "error": "the extraction plan contains inferences that must be "
+                        "confirmed; call save_report_definition without "
+                        "structure_confirmations to get a proposal and a "
+                        "confirmation_token, then send your overrides with it",
+                    },
+                    final_artifact,
+                    [],
+                    None,
+                )
             plan["_warnings"] = warnings
             token, created_at = extraction_cache.new_token(plan, conversation_id)
             extraction_cache.save(
@@ -335,6 +411,22 @@ def _normalize_free_form(
                 warnings,
                 token,
             )
+
+        if structure_confirmations:
+            # A fingerprint-clean page still registers in one call. There is nothing
+            # to confirm, but a watch or an authored_as_of is a directive rather
+            # than an inference, so it applies here without a round-trip.
+            plan, override_errors = _apply_overrides(plan, structure_confirmations)
+            if override_errors:
+                return (
+                    {
+                        "status": "invalid_structure_confirmation",
+                        "error": "; ".join(override_errors),
+                    },
+                    final_artifact,
+                    [],
+                    None,
+                )
 
     # Derived queries were executed (and logged as save_derive) during validation,
     # so refetch to pick up their rows before building islands from them.

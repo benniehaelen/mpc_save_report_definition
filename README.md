@@ -206,16 +206,51 @@ Call again with the token to apply it:
 save_report_definition(..., structure_confirmations=[{"token": "...", "accept_all": True}])
 ```
 
-Or override individual items — flip a block back to frozen prose, reject a
-derived query:
+Or override individual items — flip a block back to frozen prose, attach a
+staleness watch, reject a derived query:
 
 ```python
 structure_confirmations=[
     {"token": "..."},
-    {"block_id": "b1", "tier": "editorial"},
     {"derived": "race_gap", "accept": False},
+    {
+        "block_id": "b1",
+        "tier": "editorial",                       # computed | analytical | editorial
+        "watch": "kpi_summary[0].gap_now < 800",   # optional, editorial blocks only
+        "authored_as_of": "2025-06-30",            # optional, ISO YYYY-MM-DD
+    },
 ]
 ```
+
+A **watch** is what makes frozen prose honest: the block replays verbatim, and
+when its condition fires at a later replay the runner prepends an amber staleness
+banner. It belongs only on an editorial block — an analytical block is regenerated
+from fresh data anyway, so there is no frozen judgment left to go stale.
+
+A **fingerprint-clean page needs no token to carry a watch.** There is nothing to
+confirm, and a watch is a directive rather than an inference, so send the override
+on the first call and it registers in one:
+
+```python
+save_report_definition(..., structure_confirmations=[
+    {"block_id": "b2", "tier": "editorial", "watch": "kpi_summary[0].gap_now < 800"},
+])
+```
+
+If the plan turns out to hold an inference after all, that call is refused and you
+are told to fetch a token first — inference is exactly what a token exists to put
+in front of a human.
+
+Unlike a model's proposal, an override is an explicit human decision, so a bad one
+**fails the call** rather than being quietly dropped. Any of these returns
+`invalid_structure_confirmation` and registers nothing: an unparseable watch, a
+watch on a non-editorial block, an unknown `block_id`, or a non-ISO
+`authored_as_of`. **The token is not consumed**, so fix the entry and retry with
+the same token.
+
+The watch's *reference* is checked by the parity gate, not by the override path: a
+watch naming a result the report does not carry comes back as `parity_failed` with
+the declaration named.
 
 The plan is cached under its token, so the second call applies exactly what you
 were shown; the model is not asked again.
@@ -227,7 +262,7 @@ A token names one **proposal**, and it is **single-use**:
 | unknown token, or a token from another conversation | `structure_confirmation_expired` |
 | the artifact changed since the proposal was made | `structure_confirmation_stale` |
 | the token already registered a report | `structure_confirmation_used` (names that report) |
-| confirmations given but no token | `invalid_structure_confirmation` |
+| no token, or a bad narrative override | `invalid_structure_confirmation` |
 
 None of these register anything. A plan is a set of source offsets into the page
 it was proposed against, so applying it to an edited page would splice at the

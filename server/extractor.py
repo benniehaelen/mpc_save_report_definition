@@ -206,7 +206,8 @@ Return ONE JSON object, no prose, with these keys:
   values:          [{"value_id": str, "result": str, "selector": [...],
                      "field": str, "filters": [[name, [args]]]}]
   narrative:       [{"block_id": str, "tier": "computed"|"analytical"|"editorial",
-                     "goal": str?, "inputs": [str]?, "max_sentences": int?}]
+                     "goal": str?, "inputs": [str]?, "max_sentences": int?,
+                     "watch": str?}]
   tabs:            [{"id": str, "label": str}] | null
 
 Rules you must obey:
@@ -215,6 +216,10 @@ Rules you must obey:
   claims to cover. Computation belongs in SQL, never in the page.
 - Prefer "editorial" for prose that states an opinion or a thesis. Use "analytical"
   only for prose that merely describes numbers, and give it a goal and inputs.
+- A "watch" ("<valueref> <op> <number>", e.g. "kpi_summary[0].gap_now < 800") may be
+  proposed ONLY when the prose itself states a numeric condition or threshold
+  (e.g. "if the gap falls below 500"). Never invent a threshold the author did not
+  write. A watch belongs only on an "editorial" block.
 """
 
 
@@ -518,6 +523,15 @@ def validate_plan(
             except artifact.GrammarError as exc:
                 _drop(warnings, f"watch on {entry['block_id']}", str(exc))
                 entry.pop("watch")
+        if entry.get("watch") and entry["tier"] != "editorial":
+            # A watch marks frozen judgment. An analytical block is regenerated at
+            # every replay, so there is no frozen prose left to go stale.
+            _drop(
+                warnings,
+                f"watch on {entry['block_id']}",
+                f"its tier is {entry['tier']!r}, not 'editorial'",
+            )
+            entry.pop("watch")
         clean["narrative"].append(entry)
 
     tabs = plan.get("tabs")

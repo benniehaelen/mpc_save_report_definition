@@ -125,6 +125,17 @@ structure_confirmations=[
 ]
 ```
 
+**When the user asks for a staleness watch on a free-form report**, pass it as a
+narrative override — `{"block_id": "b2", "tier": "editorial", "watch":
+"kpi_summary[0].gap_now < 800"}`. The block must be editorial (an analytical one is
+regenerated at every replay, so nothing can go stale). Optionally set
+`"authored_as_of": "YYYY-MM-DD"`.
+
+Send it with the token on the second call when there was a round-trip. When the
+page fingerprints clean there is no token: send the override on the **first** call
+and it registers immediately. A bad override returns
+`invalid_structure_confirmation` without consuming the token: fix it and retry.
+
 Nothing is registered until you confirm. The token is **single-use** and belongs
 to the exact page it was proposed against: re-sending it after a successful save
 returns `structure_confirmation_used`, and confirming after editing the artifact

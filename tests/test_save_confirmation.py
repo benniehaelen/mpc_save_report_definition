@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from runner import regenerate
 from server import artifact, call_log, extraction_cache, registry, tools
 from server.db import ANCHOR_DATE, get_meta_connection
 
@@ -414,6 +415,222 @@ def test_a_page_edited_between_the_two_calls_is_refused(session, monkeypatch):
     # The unedited page still confirms cleanly against the same token.
     third = _save(cid, html, "FF Stale", [{"token": token, "accept_all": True}])
     assert third["status"] == "registered", third
+
+
+# ---------------------------------------------------------------------------
+# Narrative overrides: watch and authored_as_of
+# ---------------------------------------------------------------------------
+#
+# The whole chain -- plan schema, validate_plan, normalizer, artifact parser,
+# parity, runner -- already supported editorial watches. Until now nothing could
+# *put* one on a plan through the free-form flow.
+
+
+def _forced_inference(cid, result, monkeypatch):
+    """A free-form page whose plan holds an inference, so a token is issued."""
+    from server import extractor
+
+    html, plan = _plan_with_derived(cid, result["rows"], result["columns"])
+    monkeypatch.setattr(
+        extractor, "get_extractor", lambda: type("P", (), {"propose": lambda *_: plan})()
+    )
+    return html
+
+
+def _first_admissions(result) -> int:
+    return result["rows"][0]["admissions"]
+
+
+def test_a_watch_override_lands_on_the_editorial_block(session, monkeypatch):
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Watch Lands")
+
+    saved = _save(cid, html, "FF Watch Lands", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {
+            "block_id": "b0",
+            "tier": "editorial",
+            "watch": "admissions_by_division[0].admissions > 99999",
+            "authored_as_of": "2025-06-30",
+        },
+    ])
+    assert saved["status"] == "registered", saved
+
+    block = registry.get(get_meta_connection(), saved["report_id"])["editorial_blocks"][0]
+    assert block["authored_as_of"] == "2025-06-30"
+    assert block["watch"]["result"] == "admissions_by_division"
+    assert block["watch"]["field"] == "admissions"
+    assert block["watch"]["op"] == ">"
+    assert block["watch"]["value"] == 99999.0
+
+
+def test_a_watch_override_needs_no_tier_entry(session, monkeypatch):
+    """An entry carrying only a watch must still apply (the block is already editorial)."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Watch Only")
+
+    saved = _save(cid, html, "FF Watch Only", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {"block_id": "b0", "watch": "admissions_by_division[0].admissions > 1"},
+    ])
+    assert saved["status"] == "registered", saved
+    assert registry.get(get_meta_connection(), saved["report_id"])["editorial_blocks"][0]["watch"]
+
+
+def test_the_banner_fires_only_when_the_watch_condition_holds(session, monkeypatch, tmp_path):
+    """Two reports, thresholds either side of the real number."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    actual = _first_admissions(result)
+
+    ids = {}
+    for label, watch in (
+        ("fires", f"admissions_by_division[0].admissions > {actual - 1}"),
+        ("silent", f"admissions_by_division[0].admissions > {actual + 1}"),
+    ):
+        name = f"FF Banner {label}"
+        first = _save(cid, html, name)
+        saved = _save(cid, html, name, [
+            {"token": first["confirmation_token"], "accept_all": True},
+            {"block_id": "b0", "tier": "editorial", "watch": watch},
+        ])
+        assert saved["status"] == "registered", saved
+        ids[label] = saved["report_id"]
+
+    fired = regenerate.regenerate(ids["fires"], None, ANCHOR_DATE, tmp_path, ["html"])
+    silent = regenerate.regenerate(ids["silent"], None, ANCHOR_DATE, tmp_path, ["html"])
+    fired_html = next(p for p in fired if p.suffix == ".html").read_text(encoding="utf-8")
+    silent_html = next(p for p in silent if p.suffix == ".html").read_text(encoding="utf-8")
+
+    assert 'class="staleness-banner"' in fired_html
+    assert 'class="staleness-banner"' not in silent_html
+
+
+def test_bad_watch_grammar_fails_the_call_and_leaves_the_token_usable(session, monkeypatch):
+    """An override is a human decision: reject it loudly, do not silently drop it."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Bad Watch")
+    token = first["confirmation_token"]
+
+    bad = _save(cid, html, "FF Bad Watch", [
+        {"token": token, "accept_all": True},
+        {"block_id": "b0", "watch": "admissions_by_division[0].admissions <"},
+    ])
+    assert bad["status"] == "invalid_structure_confirmation"
+    assert "b0" in bad["error"]
+    assert extraction_cache.load(get_meta_connection(), token)["consumed_at"] is None
+
+    corrected = _save(cid, html, "FF Bad Watch", [
+        {"token": token, "accept_all": True},
+        {"block_id": "b0", "watch": "admissions_by_division[0].admissions < 99999"},
+    ])
+    assert corrected["status"] == "registered", corrected
+
+
+def test_a_watch_on_a_non_editorial_block_is_refused(session, monkeypatch):
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Watch Tier")
+
+    refused = _save(cid, html, "FF Watch Tier", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {
+            "block_id": "b0",
+            "tier": "analytical",
+            "goal": "summarize",
+            "watch": "admissions_by_division[0].admissions > 1",
+        },
+    ])
+    assert refused["status"] == "invalid_structure_confirmation"
+    assert "requires tier 'editorial'" in refused["error"]
+    with pytest.raises(KeyError):
+        registry.get(get_meta_connection(), "ff_watch_tier")
+
+
+def test_an_unknown_block_id_is_refused(session, monkeypatch):
+    """Today a typo'd block_id was silently ignored. It is a human decision; say so."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Bad Block")
+
+    refused = _save(cid, html, "FF Bad Block", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {"block_id": "b99", "tier": "editorial"},
+    ])
+    assert refused["status"] == "invalid_structure_confirmation"
+    assert "unknown block_id 'b99'" in refused["error"]
+
+
+def test_a_non_iso_authored_as_of_is_refused(session, monkeypatch):
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Bad Date")
+
+    refused = _save(cid, html, "FF Bad Date", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {"block_id": "b0", "authored_as_of": "June 30, 2025"},
+    ])
+    assert refused["status"] == "invalid_structure_confirmation"
+    assert "is not an ISO date" in refused["error"]
+
+
+def test_a_clean_page_takes_a_watch_without_a_token(session):
+    """No inference means no round-trip -- but a watch is a directive, not an inference."""
+    cid, result = session
+    html = _free_form_page(result["rows"], result["columns"])
+
+    saved = _save(cid, html, "FF Clean Watch", [
+        {
+            "block_id": "b0",
+            "tier": "editorial",
+            "watch": "admissions_by_division[0].admissions > 99999",
+            "authored_as_of": "2025-06-30",
+        },
+    ])
+    assert saved["status"] == "registered", saved
+
+    block = registry.get(get_meta_connection(), saved["report_id"])["editorial_blocks"][0]
+    assert block["watch"]["result"] == "admissions_by_division"
+    assert block["watch"]["op"] == ">"
+    assert block["authored_as_of"] == "2025-06-30"
+
+
+def test_a_tokenless_override_still_validates_loudly(session):
+    cid, result = session
+    html = _free_form_page(result["rows"], result["columns"])
+    refused = _save(cid, html, "FF Clean Bad", [{"block_id": "b9", "tier": "editorial"}])
+    assert refused["status"] == "invalid_structure_confirmation"
+    assert "unknown block_id 'b9'" in refused["error"]
+
+
+def test_a_tokenless_override_is_refused_when_the_plan_holds_an_inference(session, monkeypatch):
+    """Inference is exactly what a token exists to get a human to look at."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    refused = _save(cid, html, "FF Needs Token", [{"block_id": "b0", "tier": "editorial"}])
+    assert refused["status"] == "invalid_structure_confirmation"
+    assert "confirmation_token" in refused["error"]
+    with pytest.raises(KeyError):
+        registry.get(get_meta_connection(), "ff_needs_token")
+
+
+def test_a_watch_against_an_unmapped_result_fails_at_the_parity_gate(session, monkeypatch):
+    """Grammar is fine, so no new check is needed: reference completeness catches it."""
+    cid, result = session
+    html = _forced_inference(cid, result, monkeypatch)
+    first = _save(cid, html, "FF Watch Unmapped")
+
+    saved = _save(cid, html, "FF Watch Unmapped", [
+        {"token": first["confirmation_token"], "accept_all": True},
+        {"block_id": "b0", "watch": "nosuch[0].x < 1"},
+    ])
+    assert saved["status"] == "parity_failed"
+    assert "nosuch" in saved["parity"]["diff_summary"]
+    with pytest.raises(KeyError):
+        registry.get(get_meta_connection(), "ff_watch_unmapped")
 
 
 def test_an_unconsumed_token_survives_a_parity_failure(session, monkeypatch):

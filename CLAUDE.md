@@ -111,6 +111,15 @@ by the parity gate and the runner, plus the Jinja filters/globals (`pick`,
   proposes is executed and checked against the numbers it claims to reproduce
   before the server will accept it. A fingerprint match, by contrast, is fact and
   needs no confirmation.
+- **A proposal is dropped; an override fails the call.** `extractor.validate_plan`
+  discards what a model proposed but could not prove, with a warning. A
+  `structure_confirmations` entry is an explicit human decision, so
+  `tools._apply_overrides` returns `invalid_structure_confirmation` instead —
+  silently ignoring it would register something other than what was asked for. The
+  token is not consumed on that failure, so the caller can fix the entry and retry.
+  Editorial watches and `authored_as_of` are set this way; a watch is only legal on
+  an editorial block, and its *reference* is checked by the parity gate rather than
+  duplicated in the override path.
 - Synthetic data is seeded with a fixed random seed and anchored at **2025-06-30**
   (`db.ANCHOR_DATE`, kept in sync with `data/seed.py`) so parity results are
   stable. Both must change together.
