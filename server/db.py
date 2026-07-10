@@ -10,10 +10,11 @@ Storage is split across two files, and the split is load-bearing:
   number of processes -- the MCP server, the replay runner, pytest, harlequin --
   can attach at once. The moment one process opens it read-write it takes an
   *exclusive* lock and every other process is refused, read-only included.
-* ``poc_meta.sqlite`` holds the two tables the server writes: the tool-call log
-  and the definition registry. SQLite in WAL mode supports one writer alongside
-  many concurrent readers, which is exactly the access pattern the server and
-  runner need and exactly the one DuckDB refuses.
+* ``poc_meta.sqlite`` holds the tables the server writes: the tool-call log, the
+  definition registry, and the cached extraction plans awaiting confirmation.
+  SQLite in WAL mode supports one writer alongside many concurrent readers,
+  which is exactly the access pattern the server and runner need and exactly the
+  one DuckDB refuses.
 
 Keeping a writable table inside the DuckDB file would force the server to hold
 the exclusive lock for the whole session and lock everyone else out of the
@@ -42,13 +43,15 @@ _META_CONNECTIONS: dict[int, sqlite3.Connection] = {}
 
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tool_call_log (
-  call_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  conversation_id TEXT,
-  tool_name       TEXT,
-  sql_text        TEXT,
-  result_name     TEXT,
-  row_count       INTEGER,
-  called_at       TEXT
+  call_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id    TEXT,
+  tool_name          TEXT,
+  sql_text           TEXT,
+  result_name        TEXT,
+  row_count          INTEGER,
+  called_at          TEXT,
+  result_fingerprint TEXT,
+  result_rows        TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_call_log_conversation
   ON tool_call_log (conversation_id, call_id);
@@ -62,7 +65,24 @@ CREATE TABLE IF NOT EXISTS report_definitions (
   parity_attempts    INTEGER,
   PRIMARY KEY (report_id, definition_version)
 );
+
+CREATE TABLE IF NOT EXISTS extraction_plans (
+  token           TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  plan_json       TEXT,
+  created_at      TEXT
+);
 """
+
+# Columns added to tool_call_log after the table first shipped. `CREATE TABLE IF
+# NOT EXISTS` only helps a fresh store, so an existing poc_meta.sqlite needs an
+# explicit ALTER. Guarded by a pragma check, so it is idempotent and cheap.
+_TOOL_CALL_LOG_ADDED_COLUMNS = (
+    ("result_fingerprint", "TEXT"),
+    ("result_rows", "TEXT"),
+)
+
+_META_TABLES = ("tool_call_log", "report_definitions", "extraction_plans")
 
 
 def get_connection(read_only: bool = True) -> duckdb.DuckDBPyConnection:
@@ -105,16 +125,25 @@ def get_meta_connection() -> sqlite3.Connection:
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=30000")
         con.executescript(META_SCHEMA)
+        _migrate_meta_store(con)
         con.commit()
         _META_CONNECTIONS[key] = con
     return con
 
 
+def _migrate_meta_store(con: sqlite3.Connection) -> None:
+    """Add columns that post-date the original tool_call_log, in place."""
+    existing = {row[1] for row in con.execute("PRAGMA table_info(tool_call_log)")}
+    for column, sql_type in _TOOL_CALL_LOG_ADDED_COLUMNS:
+        if column not in existing:
+            con.execute(f"ALTER TABLE tool_call_log ADD COLUMN {column} {sql_type}")
+
+
 def reset_meta_store() -> None:
     """Drop and recreate the metadata tables. Used by data/seed.py."""
     con = get_meta_connection()
-    con.execute("DROP TABLE IF EXISTS tool_call_log")
-    con.execute("DROP TABLE IF EXISTS report_definitions")
+    for table in _META_TABLES:
+        con.execute(f"DROP TABLE IF EXISTS {table}")
     con.executescript(META_SCHEMA)
     con.commit()
 

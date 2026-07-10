@@ -77,15 +77,23 @@ def save_report_definition(
     transcript: list[dict],
     final_artifact: dict,
     temporal_confirmations: list[dict] | None = None,
+    structure_confirmations: list[dict] | None = None,
 ) -> dict:
     """Distill a named query set from the session, run the parity gate against
-    the final artifact, and register the definition on pass."""
+    the final artifact, and register the definition on pass.
+
+    A free-form artifact (no contract markup) is normalized first by save-time
+    structure extraction. If that rests on any inference the call returns
+    `needs_structure_confirmation` with a `confirmation_token`; pass it back in
+    `structure_confirmations`, optionally with per-item overrides, e.g.
+    `[{"token": "...", "accept_all": true}]`."""
     return tools.save_report_definition(
         conversation_id,
         report_name,
         transcript,
         final_artifact,
         temporal_confirmations,
+        structure_confirmations,
     )
 
 

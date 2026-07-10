@@ -559,6 +559,34 @@ def is_v2(html: str) -> bool:
     return any(marker.search(html) for marker in _V2_MARKERS)
 
 
+# A legacy artifact announces itself with a populated `<table data-result>` body,
+# a bare `data-value="result.field"`, or a `data-over` reasoning element. A v2
+# bound table also carries `data-result`, but its `data-columns` attribute trips
+# `is_v2` first, so it never reaches here.
+_LEGACY_MARKERS = (
+    re.compile(r"\bdata-value=", re.I),
+    re.compile(r"\bdata-over=", re.I),
+)
+_LEGACY_TABLE_RE = re.compile(
+    r"<table[^>]*\bdata-result=.*?<tbody[^>]*>\s*<tr", re.I | re.S
+)
+
+
+def detect_mode(html: str) -> str:
+    """Which artifact contract this HTML follows: v2, legacy, or free_form.
+
+    Free-form is the only mode save-time structure extraction touches. Ordering
+    matters: `is_v2` is checked first because it is the sole guard keeping a v2
+    artifact away from the v1 `data-value` regex, which would parse
+    `race[last].gap | thousands` as result `race[last]` and corrupt it silently.
+    """
+    if is_v2(html):
+        return "v2"
+    if _LEGACY_TABLE_RE.search(html) or any(m.search(html) for m in _LEGACY_MARKERS):
+        return "legacy"
+    return "free_form"
+
+
 def parse(html: str) -> ArtifactModel:
     """Parse a v2 artifact body fragment. Defects accumulate in `problems`."""
     soup = BeautifulSoup(html, "html.parser")

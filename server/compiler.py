@@ -395,16 +395,23 @@ def _with_sign_class(open_tag: str, expr: str) -> str:
     return f'{open_tag[:cut]} class="{injected}"{open_tag[cut:]}'
 
 
-def _apply_splices(html: str, splices: list[tuple[int, int, str]]) -> str:
+def apply_splices(html: str, splices: list[tuple[int, int, str]]) -> str:
     """Replace [start, end) spans, right to left so earlier edits keep offsets valid.
 
     Everything outside a splice is copied verbatim. That is what keeps untouched
     markup byte-for-byte identical and the editorial hashes stable.
+
+    Shared with `server/normalizer.py`, which rewrites a free-form artifact into
+    the v2 contract by exactly this technique.
     """
     out = html
     for start, end, replacement in sorted(splices, key=lambda s: s[0], reverse=True):
         out = out[:start] + replacement + out[end:]
     return out
+
+
+# The private name predates the normalizer; kept so existing call sites read the same.
+_apply_splices = apply_splices
 
 
 def _watch_to_json(watch: dict) -> dict:

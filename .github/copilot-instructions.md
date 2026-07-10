@@ -86,6 +86,48 @@ The runner binds `__REPORT_DATE__` to `--as-of` (default: the anchor date
 2025-06-30), executes the named queries, reasons over the fresh results, renders
 each requested format, and writes `reports/<report_id>_v<version>_<as_of>.<ext>`.
 
+## Free-form: build the report however you like
+
+You do not have to emit contract markup at all. Write the page the way you would
+write any page — JavaScript constants, hand-rolled SVG, KPI numbers as plain
+`<strong>` text, prose paragraphs. `save_report_definition` fingerprints every
+number against what `execute_sql` returned and extracts the structure for you.
+
+**One discipline remains, and it is the whole deal:**
+
+> Every displayed number must be a value `execute_sql` returned.
+
+Put the arithmetic in SQL, not in the page. A gap, a share, a delta, a sort order
+— make it a column. A number the page computed in JavaScript has no lineage and
+cannot be replayed; the server reports it rather than freezing it silently.
+
+Emitting the v2 contract yourself is still supported and **preferred when it is
+cheap**, because a contract artifact skips the confirmation round-trip.
+
+**The round-trip.** A page whose numbers all fingerprint registers in one call. If
+extraction has to *infer* anything — derive a query, decide a paragraph should be
+regenerated rather than frozen — the first call returns
+`status: needs_structure_confirmation` with a `confirmation_token` and a summary
+of what it proposes. Show the user the proposal (especially any `derived_queries`
+SQL), then call again:
+
+```python
+save_report_definition(..., structure_confirmations=[{"token": token, "accept_all": True}])
+```
+
+To override individual items instead of accepting everything:
+
+```python
+structure_confirmations=[
+    {"token": token},
+    {"block_id": "b1", "tier": "editorial"},      # freeze this prose, do not regenerate it
+    {"derived": "race_gap", "accept": True},
+]
+```
+
+Nothing is registered until you confirm. `scripts/demo_free_form.py` is a worked
+example of the whole flow.
+
 ## The v2 contract (charts, tabs, editorial)
 
 The contract above is enough for a table-and-headline report. For a chart-heavy,

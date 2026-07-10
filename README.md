@@ -148,11 +148,96 @@ Paste this into the Copilot so it produces a parity-safe artifact (verbatim):
 If parity fails, the response names the first differing table or value; the usual
 cause is cell text that does not match the query output (see the contract below).
 
+## Three artifact modes
+
+`artifact.detect_mode(html)` sniffs which contract a submitted artifact follows,
+and `save_report_definition` routes on the answer. The modes never mix.
+
+| Mode | What it looks like | What the server does |
+|---|---|---|
+| `legacy` | populated `<table data-result>` bodies, `data-value="result.field"` | v1 compiler |
+| `v2` | JSON islands, selector/filter values, `data-chart`, editorial blocks | v2 compiler |
+| `free_form` | no `data-*` at all: JS constants, hand-rolled SVG, plain prose | **extract structure, then v2 compiler** |
+
+**Free-form is the mode you get for free.** Build the page however you like. At
+save time the server fingerprints every number on it against what `execute_sql`
+returned, rewrites the page into a v2 artifact, and hands it to the same compiler
+and parity gate everything else goes through. The one discipline that remains:
+
+> **Every displayed number must be a value `execute_sql` returned.**
+
+That is what keeps extraction deterministic. A number the page computed in
+JavaScript has no lineage, so it cannot be replayed — the server will say so
+rather than freeze it silently.
+
+Emitting the v2 contract yourself is still supported and still **preferred** when
+it is cheap to do: a contract artifact skips the confirmation round-trip below.
+
+### What extraction can prove, and what it must ask about
+
+A **fingerprint match** is fact. A JS constant whose rows equal a logged result's
+rows *is* that result; no one needs to confirm it. Such a page registers in one
+call, offline, with no LLM:
+
+```bash
+python scripts/demo_free_form.py     # POC_DISTILLER unset: one call, no network
+```
+
+Anything **inferred** — a derived query, a prose block reclassified as
+regenerable, an island the model placed by guesswork — is never registered
+silently. The first call returns the proposal instead:
+
+```jsonc
+{
+  "status": "needs_structure_confirmation",
+  "extraction": {
+    "matched_islands":  [{"result_name": "race_quarters", "source": "const RACE"}],
+    "derived_queries":  [{"result_name": "race_gap", "sql": "SELECT ...", "covers": ["const:RACE_GAP"]}],
+    "narrative":        [{"block_id": "b2", "tier": "editorial", "excerpt": "Thesis: HCA can ..."}],
+    "unmatched":        ["const MYSTERY (14 rows x 2 columns)"]
+  },
+  "confirmation_token": "<sha256 of the plan>"
+}
+```
+
+Call again with the token to apply it:
+
+```python
+save_report_definition(..., structure_confirmations=[{"token": "...", "accept_all": True}])
+```
+
+Or override individual items — flip a block back to frozen prose, reject a
+derived query:
+
+```python
+structure_confirmations=[
+    {"token": "..."},
+    {"block_id": "b1", "tier": "editorial"},
+    {"derived": "race_gap", "accept": False},
+]
+```
+
+The plan is cached under its token, so the second call applies exactly what you
+were shown; the model is not asked again. A wrong or unknown token registers
+nothing.
+
+Two guarantees hold whichever engine proposed the plan. The server **executes**
+every proposed derived query and checks it really does reproduce the numbers it
+claims to cover, dropping it with a warning if not. And a proposal may never
+contradict a fingerprint match — it can only fill in what fingerprinting could not
+reach. Whatever is still unmatched at the end surfaces in `warnings` and
+`unreplayable_sections`, never in silence.
+
+Set `POC_DISTILLER=anthropic` to let a model propose derived SQL, charts, and
+narrative tiers. It is opt-in, falls back to the deterministic extractor on any
+failure, and changes nothing about what the server will accept.
+
 ## IMPORTANT: how the client must build the HTML artifact
 
-The compiler recovers a report's lineage from the HTML you submit. For a section
-to be replayable, the artifact must carry data attributes that tie rendered
-content back to named query results:
+This section describes the **v1 (legacy)** contract. The compiler recovers a
+report's lineage from the HTML you submit. For a section to be replayable, the
+artifact must carry data attributes that tie rendered content back to named query
+results:
 
 - **Every table** that should be replayed must be
   `<table data-result="<result_name>">` where `<result_name>` matches the name

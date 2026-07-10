@@ -1,10 +1,14 @@
 """Lint a submitted v2 artifact.
 
-Two classes of defect, neither of which the parity gate would catch:
+Three classes of defect, none of which the parity gate would catch:
 
 * **Author-written template logic.** The compiler *produces* Jinja; an artifact
   that already contains ``{{ }}`` or ``{% %}`` would have it rendered at replay,
   which is a code path nobody reviewed. Reject it.
+* **Editorial on a table row or cell.** The compiler splices an
+  ``editorial_banner(...)`` -- a ``<div>`` -- immediately before each editorial
+  block. Before a ``<tr>`` that puts a div between table rows, which no browser
+  renders as intended. Reject it; the block belongs outside the table.
 * **Literal period labels.** A heading that reads ``Gap to #1 (Q1'25)`` is frozen
   prose. It looks right the day it is written and lies at every later replay,
   and because parity only compares data values, nothing else notices. The fix is
@@ -38,6 +42,10 @@ _BOUND_ATTRS = (
 
 _LABEL_SELECTOR = "h1, h2, h3, h4, h5, h6, .kpi-label, [data-kpi-label]"
 
+# The staleness banner is a <div>; these are the elements it cannot legally
+# precede.
+_TABLE_INTERNAL = ("tr", "td", "th", "thead", "tbody", "tfoot")
+
 
 def _inside_bound_element(node) -> bool:
     for ancestor in node.parents:
@@ -59,6 +67,15 @@ def lint(html: str) -> tuple[list[str], list[str]]:
         )
 
     soup = BeautifulSoup(html, "html.parser")
+
+    for block in soup.select("[data-editorial]"):
+        if block.name in _TABLE_INTERNAL:
+            unreplayable.append(
+                f"editorial block {block.get('data-editorial')!r} is a <{block.name}>; "
+                "the staleness banner is a <div> and cannot precede a table row. "
+                "Move the block outside the table."
+            )
+
     for label in soup.select(_LABEL_SELECTOR):
         if _inside_bound_element(label):
             continue

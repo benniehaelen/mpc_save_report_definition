@@ -246,3 +246,62 @@ def test_real_las_vegas_snippet_parses():
     ]
     assert model.editorial_blocks[0]["watch"]["value"] == 800.0
     assert model.reasoning_steps[0]["max_sentences"] == 3
+
+
+# ---------------------------------------------------------------------------
+# detect_mode (WS11-C)
+# ---------------------------------------------------------------------------
+
+_V2_SAMPLES = [
+    '<script type="application/json" data-result="race">[]</script>',
+    '<div data-editorial="thesis">x</div>',
+    "<div data-chart='{\"type\":\"line\",\"result\":\"r\"}'></div>",
+    '<table data-result="r" data-columns="a:A"><tbody></tbody></table>',
+    '<p data-reasoning="s" data-goal="g" data-inputs="r"></p>',
+    "<nav data-tabs='[{\"id\":\"a\",\"label\":\"A\"}]'></nav>",
+    '<span data-value="race[last].gap">1</span>',
+    '<span data-value="race.gap | thousands">1</span>',
+]
+
+_LEGACY_SAMPLES = [
+    '<table data-result="adm"><tbody><tr><td>1</td></tr></tbody></table>',
+    '<span data-value="occ.rate">0.72</span>',
+    '<p data-reasoning="s" data-over="adm.x">text</p>',
+]
+
+_FREE_FORM_SAMPLES = [
+    "<div><script>const RACE = [{a: 1}];</script></div>",
+    "<h1>Admissions</h1><p>The gap narrowed.</p><strong>662</strong>",
+    "<table><tbody><tr><td>1</td></tr></tbody></table>",  # unbound table
+]
+
+
+@pytest.mark.parametrize("html", _V2_SAMPLES)
+def test_detect_mode_v2(html):
+    assert artifact.detect_mode(html) == "v2"
+
+
+@pytest.mark.parametrize("html", _LEGACY_SAMPLES)
+def test_detect_mode_legacy(html):
+    assert artifact.detect_mode(html) == "legacy"
+
+
+@pytest.mark.parametrize("html", _FREE_FORM_SAMPLES)
+def test_detect_mode_free_form(html):
+    assert artifact.detect_mode(html) == "free_form"
+
+
+@pytest.mark.parametrize("html", _V2_SAMPLES + _LEGACY_SAMPLES + _FREE_FORM_SAMPLES)
+def test_detect_mode_agrees_with_is_v2(html):
+    """is_v2 is the only guard between a v2 artifact and the corrupting v1 regex.
+
+    detect_mode must never disagree with it, and adding detect_mode must not have
+    changed what is_v2 answers.
+    """
+    assert (artifact.detect_mode(html) == "v2") is artifact.is_v2(html)
+
+
+def test_a_v2_bound_table_is_never_mistaken_for_legacy():
+    """Both carry data-result; only the v2 one has data-columns and an empty tbody."""
+    html = '<table data-result="r" data-columns="a:A"><tbody></tbody></table>'
+    assert artifact.detect_mode(html) == "v2"

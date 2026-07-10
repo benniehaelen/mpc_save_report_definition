@@ -17,20 +17,23 @@ sys.path.insert(0, str(ROOT))
 def _deterministic_reasoning():
     """Keep the suite offline and deterministic.
 
-    `server/reasoning.py` loads a gitignored .env, so a developer who has opted
-    into `POC_REASONING=anthropic` would otherwise have every test that saves or
-    replays a report call the Anthropic API -- slow, billed, and non-deterministic.
-    Tests that exercise the LLM engine set the variable themselves via monkeypatch.
+    `server/reasoning.py` and `server/extractor.py` both load a gitignored .env, so
+    a developer who has opted into `POC_REASONING=anthropic` or
+    `POC_DISTILLER=anthropic` would otherwise have every test that saves or replays
+    a report call the Anthropic API -- slow, billed, and non-deterministic.
+    Tests that exercise the LLM engines set the variables themselves via monkeypatch.
     """
     import os
 
-    previous = os.environ.get("POC_REASONING")
-    os.environ["POC_REASONING"] = "heuristic"
+    pinned = {"POC_REASONING": "heuristic", "POC_DISTILLER": "deterministic"}
+    previous = {name: os.environ.get(name) for name in pinned}
+    os.environ.update(pinned)
     yield
-    if previous is None:
-        os.environ.pop("POC_REASONING", None)
-    else:
-        os.environ["POC_REASONING"] = previous
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 @pytest.fixture(scope="session", autouse=True)

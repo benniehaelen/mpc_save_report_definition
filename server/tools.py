@@ -7,13 +7,19 @@ DuckDB connection from server.db so tests can call them in-process.
 
 from __future__ import annotations
 
+import json
 import re
 
 from server import (
+    artifact,
     call_log,
     compiler,
+    extraction_cache,
+    extractor,
+    fingerprint,
     intent_catalog,
     knowledge_graph,
+    normalizer,
     parity,
     registry,
 )
@@ -100,8 +106,16 @@ def dry_run_sql(conversation_id: str, sql: str) -> dict:
     return {"valid": True, "result_columns": columns, "error": None}
 
 
-def execute_sql(conversation_id: str, sql: str, result_name: str) -> dict:
-    """Execute a validated SELECT (capped at 500 rows) and log the call."""
+def execute_logged(
+    conversation_id: str, sql: str, result_name: str, tool_name: str = "execute_sql"
+) -> dict:
+    """Execute a validated SELECT (row-capped), fingerprint it, and log the call.
+
+    ``tool_name`` distinguishes lineage sources: the ``execute_sql`` tool, versus
+    ``save_derive`` for a query the structure extractor proposed and the server
+    verified at save time. Both are real lineage -- the compiler matches result
+    names against this log regardless of which tool produced them.
+    """
     ok, error = _validate_select(sql)
     if not ok:
         return {"error": error, "result_name": result_name}
@@ -116,8 +130,16 @@ def execute_sql(conversation_id: str, sql: str, result_name: str) -> dict:
     truncated = len(fetched) > _ROW_CAP
     fetched = fetched[:_ROW_CAP]
     rows = [dict(zip(columns, row)) for row in fetched]
+    fingerprint, canonical = call_log.fingerprint_result(columns, rows)
     call_log.log_call(
-        get_meta_connection(), conversation_id, "execute_sql", sql, result_name, len(rows)
+        get_meta_connection(),
+        conversation_id,
+        tool_name,
+        sql,
+        result_name,
+        len(rows),
+        result_fingerprint=fingerprint,
+        result_rows=canonical,
     )
     return {
         "result_name": result_name,
@@ -128,19 +150,213 @@ def execute_sql(conversation_id: str, sql: str, result_name: str) -> dict:
     }
 
 
+def execute_sql(conversation_id: str, sql: str, result_name: str) -> dict:
+    """Execute a validated SELECT (capped at 500 rows) and log the call."""
+    return execute_logged(conversation_id, sql, result_name, "execute_sql")
+
+
+def _extraction_summary(plan: dict, report) -> dict:
+    """What the client is being asked to confirm, in human-readable terms."""
+    blob_names = {b.blob_id: b.describe() for b in report.blobs}
+    return {
+        "matched_islands": [
+            {"result_name": i["result_name"], "source": blob_names.get(i["blob_id"], i["blob_id"])}
+            for i in plan.get("islands", [])
+            if i.get("origin") == "fingerprint"
+        ],
+        "proposed_islands": [
+            {"result_name": i["result_name"], "source": blob_names.get(i["blob_id"], i["blob_id"])}
+            for i in plan.get("islands", [])
+            if i.get("origin") != "fingerprint"
+        ],
+        "derived_queries": [
+            {"result_name": d["result_name"], "sql": d["sql"], "covers": d.get("covers", [])}
+            for d in plan.get("derived_queries", [])
+        ],
+        "charts": plan.get("charts", []),
+        "narrative": [
+            {
+                "block_id": n["block_id"],
+                "tier": n.get("tier", "editorial"),
+                "excerpt": n.get("excerpt", ""),
+                **({"goal": n["goal"]} if n.get("goal") else {}),
+            }
+            for n in plan.get("narrative", [])
+        ],
+        "unmatched": [b.describe() for b in report.unmatched]
+        + [f"const {n} is computed in JavaScript" for n in report.unparseable]
+        + [f"unresolved number {s.raw_text!r}" for s in report.unresolved_values],
+    }
+
+
+def _apply_overrides(plan: dict, confirmations: list[dict]) -> dict:
+    """Fold the client's per-item decisions into the cached plan."""
+    plan = json.loads(json.dumps(plan))  # deep copy; the cached plan stays pristine
+    accept_all = any(c.get("accept_all") for c in confirmations)
+
+    accepted: set[str] = set()
+    rejected: set[str] = set()
+    for entry in confirmations:
+        if "derived" in entry:
+            (accepted if entry.get("accept", True) else rejected).add(entry["derived"])
+        if "block_id" in entry and entry.get("tier"):
+            for block in plan.get("narrative", []):
+                if block["block_id"] == entry["block_id"]:
+                    block["tier"] = entry["tier"]
+                    if entry.get("goal"):
+                        block["goal"] = entry["goal"]
+
+    proposed = plan.get("derived_queries", [])
+    if accept_all:
+        kept = [d for d in proposed if d["result_name"] not in rejected]
+    else:
+        kept = [d for d in proposed if d["result_name"] in accepted]
+    plan["derived_queries"] = kept
+
+    # A rejected derived query takes its dependents with it. Its rows exist in the
+    # log (validation executed it to prove coverage), so an island bound to it
+    # would otherwise still be built from data the client just declined.
+    dropped = {d["result_name"] for d in proposed} - {d["result_name"] for d in kept}
+    if dropped:
+        plan["islands"] = [i for i in plan.get("islands", []) if i["result_name"] not in dropped]
+        plan["values"] = [v for v in plan.get("values", []) if v.get("result") not in dropped]
+        plan["charts"] = [c for c in plan.get("charts", []) if c.get("result") not in dropped]
+    return plan
+
+
+def _normalize_free_form(
+    conversation_id: str,
+    final_artifact: dict,
+    structure_confirmations: list[dict] | None,
+) -> tuple[dict | None, dict, list[str]]:
+    """Fingerprint, propose, confirm, and rewrite a free-form artifact.
+
+    Returns ``(early_response, normalized_artifact, warnings)``. When
+    ``early_response`` is not None the caller must return it unchanged: the plan
+    contains inferences the client has not yet confirmed, and nothing may be
+    registered on inference alone.
+    """
+    meta = get_meta_connection()
+    html = final_artifact.get("content", "")
+    calls = call_log.fetch(meta, conversation_id)
+    report = fingerprint.match(html, calls)
+    session = extractor.SessionContext(
+        conversation_id=conversation_id,
+        calls=calls,
+        anchor_date=ANCHOR_DATE,
+        con=get_connection(),
+        meta=meta,
+    )
+
+    if structure_confirmations:
+        token = next((c.get("token") for c in structure_confirmations if c.get("token")), None)
+        if not token:
+            return (
+                {
+                    "status": "invalid_structure_confirmation",
+                    "error": "structure_confirmations must carry the confirmation_token "
+                    "returned by the first save call",
+                },
+                final_artifact,
+                [],
+            )
+        cached = extraction_cache.load(meta, token)
+        if cached is None or cached["conversation_id"] != conversation_id:
+            return (
+                {
+                    "status": "structure_confirmation_expired",
+                    "error": f"no cached extraction plan for token {token[:12]}... in this "
+                    "conversation; call save_report_definition again to get a fresh proposal",
+                },
+                final_artifact,
+                [],
+            )
+        plan = cached["plan"]
+        if extraction_cache.plan_token(plan) != token:
+            return (
+                {
+                    "status": "structure_confirmation_stale",
+                    "error": "the cached plan no longer hashes to its token",
+                },
+                final_artifact,
+                [],
+            )
+        plan = _apply_overrides(plan, structure_confirmations)
+        warnings = list(cached["plan"].get("_warnings", []))
+    else:
+        proposed = extractor.get_extractor().propose(html, report, session)
+        plan, warnings = extractor.validate_plan(proposed, report, session)
+        if extractor.has_inferences(plan):
+            plan["_warnings"] = warnings
+            token = extraction_cache.plan_token(plan)
+            extraction_cache.save(meta, token, conversation_id, plan)
+            return (
+                {
+                    "status": "needs_structure_confirmation",
+                    "report_id": None,
+                    "definition_version": None,
+                    "extraction": _extraction_summary(plan, report),
+                    "confirmation_token": token,
+                    "warnings": warnings,
+                },
+                final_artifact,
+                warnings,
+            )
+
+    # Derived queries were executed (and logged as save_derive) during validation,
+    # so refetch to pick up their rows before building islands from them.
+    calls = call_log.fetch(meta, conversation_id)
+    logged_rows = _rows_by_result(calls)
+    normalized_html, summary = normalizer.normalize(
+        html, plan, logged_rows, report, save_date=ANCHOR_DATE
+    )
+    normalized = {**final_artifact, "content": normalized_html}
+    return None, normalized, warnings + summary.warnings + [
+        f"unextracted: {item}" for item in summary.unmatched
+    ]
+
+
+def _rows_by_result(calls: list[dict]) -> dict[str, list[dict]]:
+    """Latest logged rows per result name, as row dicts."""
+    rows: dict[str, list[dict]] = {}
+    for call in calls:
+        payload = call.get("result_rows")
+        name = call.get("result_name")
+        if not name or not payload:
+            continue
+        columns = payload["columns"]
+        rows[name] = [dict(zip(columns, row)) for row in payload["rows"]]
+    return rows
+
+
 def save_report_definition(
     conversation_id: str,
     report_name: str,
     transcript: list[dict],
     final_artifact: dict,
     temporal_confirmations: list[dict] | None = None,
+    structure_confirmations: list[dict] | None = None,
 ) -> dict:
-    """Distill a definition, run the parity gate, and register on pass."""
+    """Distill a definition, run the parity gate, and register on pass.
+
+    A v2-contract or legacy artifact goes straight to the compiler, exactly as
+    before. A **free-form** artifact is first normalized into the v2 contract by
+    save-time structure extraction; if that normalization rests on any inference,
+    the call returns `needs_structure_confirmation` and registers nothing.
+    """
     con = get_connection()
     meta = get_meta_connection()
-    log_rows = call_log.fetch(meta, conversation_id)
     catalog = knowledge_graph.load_catalog(con)
 
+    extraction_warnings: list[str] = []
+    if artifact.detect_mode(final_artifact.get("content", "")) == "free_form":
+        early, final_artifact, extraction_warnings = _normalize_free_form(
+            conversation_id, final_artifact, structure_confirmations
+        )
+        if early is not None:
+            return early
+
+    log_rows = call_log.fetch(meta, conversation_id)
     definition: dict = {}
     parity_result = {"passed": False, "diff_summary": "no attempt made"}
     attempts = 0
@@ -167,6 +383,7 @@ def save_report_definition(
     definition["warnings"] = definition.get("warnings", []) + [
         f"binding validation: {err}" for err in binding_errors
     ]
+    definition["warnings"] = extraction_warnings + definition["warnings"]
 
     parity_block = {
         "passed": parity_result["passed"],
