@@ -10,24 +10,30 @@ user asks you to build, save, or regenerate a report.
 
 ## The build loop
 
-1. **Reuse one `conversation_id`** string for every tool call in the session. It
-   is the session key that ties your queries together into lineage.
-2. Call **`nl_query(conversation_id, question)`** with the user's question. Read
-   `suggested_sql` and the returned table and column lists. It executes nothing.
-3. Refine the SQL, then **`dry_run_sql(conversation_id, sql)`**. Fix any error and
-   dry-run again until it validates. Dry runs are not recorded as lineage.
-4. **`execute_sql(conversation_id, sql, result_name)`** with a clear snake_case
-   `result_name` (for example `admissions_by_division`). Repeat for each result
-   the report needs. Do not reference throwaway queries in the report — unreferenced
-   results drop out of the definition automatically.
+1. **Do not fabricate or pass a `conversation_id`.** The session is correlated
+   automatically from your client's trace id, so every call in one chat ties into
+   the same lineage on its own. (If you do pass one it still wins, but you never
+   need to — and inventing a fresh string per call is the classic way to break a
+   save.)
+2. Call **`nl_query(question)`** with the user's question. Read `suggested_sql`
+   and the returned table and column lists. It executes nothing.
+3. Refine the SQL, then **`dry_run_sql(sql)`**. Fix any error and dry-run again
+   until it validates. Dry runs are not recorded as lineage.
+4. **`execute_sql(sql, result_name)`** with a clear snake_case `result_name` (for
+   example `admissions_by_division`). Repeat for each result the report needs. Do
+   not reference throwaway queries in the report — unreferenced results drop out of
+   the definition automatically.
 5. Build the report as an **HTML body fragment** following the artifact contract
    below.
-6. Call **`save_report_definition(conversation_id, report_name, transcript,
-   final_artifact, temporal_confirmations=None)`**, where:
+6. Call **`save_report_definition(report_name, transcript, final_artifact,
+   temporal_confirmations=None)`**, where:
    - `transcript` is `[{role, content}]`.
    - `final_artifact = {format: "html", title, content, formats: ["html", "md"]}`.
 7. Report back `status`, `parity.passed`, `report_id`, and any `warnings` or
-   `unreplayable_sections`.
+   `unreplayable_sections`. The response's `session` block shows the correlation
+   key, its `source`, and how many queries were found under it. A `no_logged_calls`
+   status means the session lost correlation (usually a reloaded chat) — re-run the
+   `execute_sql` calls in this chat and save again.
 
 If parity fails, the response names the first differing table or value. The usual
 cause is cell text that does not match the query output — see the contract.

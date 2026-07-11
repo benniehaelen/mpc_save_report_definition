@@ -17,6 +17,22 @@ from server.db import PROJECT_ROOT
 _LOG_PATH = PROJECT_ROOT / "logs" / "spans.jsonl"
 
 
+def log_span(name: str, **attributes: object) -> None:
+    """Append one standalone span line to the span log.
+
+    A lighter sibling of ``RunRecorder`` for the request boundary, where there is
+    no multi-step run to record -- just a single event and its attributes (e.g. a
+    tool call's resolved correlation source). Best-effort: never let diagnostics
+    break a tool call, so a write failure is swallowed.
+    """
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"span": name, "attributes": attributes}) + "\n")
+    except OSError:
+        pass
+
+
 class RunRecorder:
     """Collect ordered spans for a single replay run."""
 

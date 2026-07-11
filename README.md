@@ -71,20 +71,48 @@ connect it to Claude Code, register it in your MCP config, for example:
 
 ### The four tools
 
-Every tool takes `conversation_id` as its first argument (an opaque session key).
+Each tool accepts an optional `conversation_id` session key (see "Session
+correlation" below); the arguments that matter are listed first.
 
-- **nl_query(conversation_id, question)** maps a natural language question to a
-  matched intent, the relevant tables with their columns, and a suggested SQL
-  template for the last 30 days ending at the anchor. Executes nothing.
-- **dry_run_sql(conversation_id, sql)** validates a single SELECT and returns its
-  result columns. Not recorded as lineage.
-- **execute_sql(conversation_id, sql, result_name)** runs a validated SELECT
-  (capped at 500 rows), assigns it `result_name`, logs the call, and returns the
-  rows. The `result_name` is what makes named results work later.
-- **save_report_definition(conversation_id, report_name, transcript,
-  final_artifact, temporal_confirmations=None)** distills a named query set from
-  the logged calls, runs the parity gate against the final artifact, and
-  registers the definition on pass.
+- **nl_query(question)** maps a natural language question to a matched intent, the
+  relevant tables with their columns, and a suggested SQL template for the last 30
+  days ending at the anchor. Executes nothing.
+- **dry_run_sql(sql)** validates a single SELECT and returns its result columns.
+  Not recorded as lineage.
+- **execute_sql(sql, result_name)** runs a validated SELECT (capped at 500 rows),
+  assigns it `result_name`, logs the call, and returns the rows. The `result_name`
+  is what makes named results work later.
+- **save_report_definition(report_name, transcript, final_artifact,
+  temporal_confirmations=None)** distills a named query set from the logged calls,
+  runs the parity gate against the final artifact, and registers the definition on
+  pass. Its response carries a `session` block naming the correlation key used.
+
+### Session correlation
+
+Every logged call is keyed so `save_report_definition` can gather the queries a
+report was built from. The key is resolved by a fallback chain, so a client no
+longer has to invent and repeat one consistently:
+
+1. **Explicit** — a non-empty `conversation_id` argument wins, always. This stays
+   the contract for the demo scripts, the tests, and any non-Copilot client.
+2. **`_meta`** — otherwise the key is taken from the client's MCP `_meta` trace id.
+   VS Code Copilot sends `vscode.conversationId`, stable for the whole chat, so all
+   its calls correlate automatically. The field list is `POC_CORRELATION_META_KEYS`
+   (comma-separated, default `vscode.conversationId`); a meta-derived key is
+   prefixed `meta-`.
+3. **Generated** — otherwise a `gen-<uuid>` key is minted and every response warns
+   that correlation was not established.
+
+A save whose key has no logged calls (the symptom of a chat reload that rotated
+the id) returns `status: no_logged_calls` naming the key and the remedy, rather
+than a mystifying empty definition. Run the server with `POC_LOG_META=1` and
+`python scripts/analyze_meta_probe.py` to inspect what `_meta` a client actually
+sends.
+
+> Production note: on a shared, multi-tenant server the key must be namespaced by
+> the authenticated principal (`key = f"{principal}:{value}"`) — a client-supplied
+> id is a claim, not an identity. The id correlates; authentication authorizes.
+> `server/correlation.py` documents this but does not implement it (single-user POC).
 
 ## Copilot session (capture path), step by step
 
