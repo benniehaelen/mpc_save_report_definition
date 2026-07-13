@@ -486,24 +486,16 @@ def save_report_definition(
             return early
 
     log_rows = call_log.fetch(meta, conversation_id)
-    definition: dict = {}
-    parity_result = {"passed": False, "diff_summary": "no attempt made"}
-    attempts = 0
-    for attempt in range(1, 4):
-        attempts = attempt
-        definition = compiler.distill(
-            report_name=report_name,
-            transcript=transcript,
-            final_artifact=final_artifact,
-            log_rows=log_rows,
-            anchor_date=ANCHOR_DATE,
-            catalog=catalog,
-            temporal_confirmations=temporal_confirmations,
-            attempt=attempt,
-        )
-        parity_result = parity.check(con, definition, final_artifact, ANCHOR_DATE)
-        if parity_result["passed"]:
-            break
+    definition = compiler.distill(
+        report_name=report_name,
+        transcript=transcript,
+        final_artifact=final_artifact,
+        log_rows=log_rows,
+        anchor_date=ANCHOR_DATE,
+        catalog=catalog,
+        temporal_confirmations=temporal_confirmations,
+    )
+    parity_result = parity.check(con, definition, final_artifact, ANCHOR_DATE)
 
     # Validate the distilled metric bindings against the knowledge graph.
     binding_errors = knowledge_graph.validate_bindings(
@@ -516,7 +508,7 @@ def save_report_definition(
 
     parity_block = {
         "passed": parity_result["passed"],
-        "attempts": attempts,
+        "attempts": 1,
         "diff_summary": parity_result["diff_summary"],
     }
     if not parity_result["passed"]:
@@ -531,7 +523,7 @@ def save_report_definition(
             "unreplayable_sections": definition.get("unreplayable_sections", []),
         }
 
-    report_id, version = registry.register(meta, report_name, definition, attempts)
+    report_id, version = registry.register(meta, report_name, definition, 1)
     if confirmed_token:
         extraction_cache.mark_consumed(meta, confirmed_token, report_id)
     return {

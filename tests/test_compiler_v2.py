@@ -56,12 +56,6 @@ def test_dead_end_queries_drop_out():
     assert "scratch" not in names
 
 
-def test_retry_widens_to_every_logged_query():
-    definition = _distill(_two_island_artifact(), attempt=2)
-    names = {q["result_name"] for q in definition["parameterized_sql"]}
-    assert "scratch" in names
-
-
 def test_unmatched_reference_is_unreplayable():
     html = render.build_island("nope", _RACE)
     definition = _distill(html)

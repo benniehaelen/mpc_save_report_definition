@@ -65,8 +65,8 @@ The system has two paths that meet at the `report_definitions` registry:
 `conversation_id`, with a fingerprint and the canonical rows) →
 `save_report_definition`. The last tool runs `compiler.distill` →
 `temporal.reparameterize` → `knowledge_graph.validate_bindings` → `parity.check`,
-and only calls `registry.register` if parity passes. It retries distillation up to
-3 times to reach parity before giving up with `status: parity_failed`.
+and only calls `registry.register` if parity passes; otherwise it returns
+`status: parity_failed` with the first differing value named.
 
 A **free-form** artifact (see below) is normalized before that pipeline runs:
 `fingerprint.match` → `extractor.propose` → `extractor.validate_plan` →

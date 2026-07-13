@@ -250,7 +250,6 @@ def distill(
     anchor_date: str,
     catalog: dict | None = None,
     temporal_confirmations: list[dict] | None = None,
-    attempt: int = 1,
 ) -> dict:
     """Produce a candidate definition from the session record.
 
@@ -269,7 +268,6 @@ def distill(
         anchor_date,
         catalog,
         temporal_confirmations,
-        attempt,
     )
 
 
@@ -281,13 +279,8 @@ def _distill_legacy(
     anchor_date: str,
     catalog: dict | None = None,
     temporal_confirmations: list[dict] | None = None,
-    attempt: int = 1,
 ) -> dict:
-    """The v1 contract: populated tables, `result.field` values, data-over steps.
-
-    On retry attempts (attempt > 1) the matching is widened to include every
-    logged query, not just those referenced by the artifact.
-    """
+    """The v1 contract: populated tables, `result.field` values, data-over steps."""
     catalog = catalog or _EMPTY_CATALOG
     html = final_artifact.get("content", "")
     latest = _latest_by_name(log_rows)
@@ -301,11 +294,6 @@ def _distill_legacy(
             )
 
     included = [name for name in referenced if name in latest]
-    if attempt > 1:
-        for name in latest:
-            if name not in included:
-                included.append(name)
-
     matched = set(included)
     warnings: list[str] = []
     parameterized_sql: list[dict] = []
@@ -547,7 +535,6 @@ def _distill_v2(
     anchor_date: str,
     catalog: dict | None = None,
     temporal_confirmations: list[dict] | None = None,
-    attempt: int = 1,
 ) -> dict:
     """The v2 contract. Same four-part definition, plus editorial blocks."""
     catalog = catalog or _EMPTY_CATALOG
@@ -567,10 +554,6 @@ def _distill_v2(
             )
 
     included = [name for name in referenced if name in latest]
-    if attempt > 1:
-        for name in latest:
-            if name not in included:
-                included.append(name)
     matched = set(included)
 
     parameterized_sql: list[dict] = []
