@@ -75,7 +75,8 @@ query results.
   - a headline: `data-value="kpi.total_admissions | thousands"`;
   - a table column: make it a **bound table** whose empty `<tbody>` the runtime
     fills — `<table data-result="admissions_by_division" data-columns="division:Division, admissions:Admissions|thousands"><thead>…</thead><tbody></tbody></table>`
-    (leave `<tbody>` empty; the runtime fills and formats it, in any layout).
+    (leave `<tbody>` empty; the compiler supplies the table's data from the named
+    query, and the runtime fills and formats it in the browser, in any layout).
 
   Filters: `thousands`, `pct(n)`, `pp`, `signed`, `round(n)`. Prefer these whenever
   the report should show formatted numbers, even for a single small table.

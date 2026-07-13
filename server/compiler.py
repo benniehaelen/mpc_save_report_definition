@@ -527,6 +527,30 @@ def _field_pairs_v2(model, matched: set[str]) -> list[tuple[str, str]]:
     return pairs
 
 
+def _inject_missing_islands(template: str, model, matched: set) -> str:
+    """Supply a data island for any bound table or chart that lacks one.
+
+    A bound table and a chart are filled/drawn by the runtime from a JSON data
+    island (`<script type="application/json" data-result="X">`). Declaring the
+    table or chart without also embedding its result as an island is easy to
+    forget, and the parity gate does not catch it -- the reference still resolves
+    to a logged query -- so the table renders empty in the browser. Emit the
+    island here so the runtime always has data to read. Parity is unaffected: it
+    compares the artifact's own islands, and the injected rows come from the same
+    query it runs.
+    """
+    have = set(model.islands)
+    consumers = [t["result"] for t in model.bound_tables]
+    consumers += [c.get("result") for c in model.charts if c.get("result")]
+    missing = [n for n in dict.fromkeys(consumers) if n in matched and n not in have]
+    islands = "".join(
+        f'<script type="application/json" data-result="{n}">'
+        f"{{{{ {n}.rows | tojson }}}}</script>"
+        for n in missing
+    )
+    return islands + template if islands else template
+
+
 def _distill_v2(
     report_name: str,
     transcript: list[dict],
@@ -568,6 +592,7 @@ def _distill_v2(
     template, reasoning_steps, editorial_blocks = _build_template_v2(
         html, model, matched, unreplayable
     )
+    template = _inject_missing_islands(template, model, matched)
 
     formats = [fmt.lower() for fmt in final_artifact.get("formats", ["html"])]
     if "html" not in formats:
