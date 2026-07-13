@@ -119,14 +119,16 @@ def test_the_banner_appears_only_when_the_watch_fires(con):
     results = {"kpi_summary": parity.run_named_query(con, _KPI_SQL, ANCHOR_DATE)}
 
     without = render.render_html(definition, results, {}, ANCHOR_DATE, stale_blocks={})
-    assert "staleness-banner" not in without
+    # Check for the banner element, not the substring: the base template always
+    # carries a `.staleness-banner` CSS rule so the class name is present regardless.
+    assert 'class="staleness-banner"' not in without
 
     with_banner = render.render_html(
         definition, results, {}, ANCHOR_DATE, stale_blocks={"thesis": "watch fired"}
     )
     assert 'class="staleness-banner"' in with_banner
     # The banner precedes the prose it qualifies, and the prose is still verbatim.
-    assert with_banner.index("staleness-banner") < with_banner.index(_PROSE)
+    assert with_banner.index('class="staleness-banner"') < with_banner.index(_PROSE)
 
 
 @pytest.mark.parametrize(

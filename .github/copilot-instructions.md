@@ -68,6 +68,17 @@ query results.
   The parity gate compares extracted numbers, not markup, so hand-formatted or
   rounded values that differ from the query output will fail parity. (Narrative
   prose is not compared, since it carries no `data-value`.)
+- **To display a number *formatted* (thousands separators, `%`, `+/-` signs), do
+  not type the formatted text** — the replay renders the raw value, so a v1 table
+  or a bare `data-value` always shows `9751`, never `9,751`. Formatting is a filter
+  in the value grammar, applied at render time. Two ways:
+  - a headline: `data-value="kpi.total_admissions | thousands"`;
+  - a table column: make it a **bound table** whose empty `<tbody>` the runtime
+    fills — `<table data-result="admissions_by_division" data-columns="division:Division, admissions:Admissions|thousands"><thead>…</thead><tbody></tbody></table>`
+    (leave `<tbody>` empty; the runtime fills and formats it, in any layout).
+
+  Filters: `thousands`, `pct(n)`, `pp`, `signed`, `round(n)`. Prefer these whenever
+  the report should show formatted numbers, even for a single small table.
 - Request output formats with `final_artifact["formats"]`, for example
   `["html", "md"]`. HTML is always included.
 - Submit `content` as a **body fragment** (heading, tables, headline spans,

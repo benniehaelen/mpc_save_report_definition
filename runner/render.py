@@ -304,7 +304,14 @@ def render_html(
 
     if spec.get("layout") != TABBED_LAYOUT:
         base = _env.get_template("report_base.html.j2")
-        return base.render(title=_title(definition), body=body_html)
+        # Inline the runtime so a non-tabbed v2 report's bound tables fill and its
+        # values format in the browser. It is a no-op for a v1 report (no islands,
+        # bound tables, or charts for it to act on).
+        return base.render(
+            title=_title(definition),
+            body=body_html,
+            runtime_js=_read_asset("runtime", "charts_v1", ".js"),
+        )
 
     sections = spec.get("sections") or []
     prelude, panels = _split_sections(body_html, sections)

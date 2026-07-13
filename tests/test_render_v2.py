@@ -216,28 +216,12 @@ def test_unknown_theme_fails_loudly():
 
 # --- legacy path unchanged -----------------------------------------------
 
-_LEGACY_GOLDEN = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Legacy</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
-    h1, h2 { color: #123; }
-    table { border-collapse: collapse; margin: 1rem 0; }
-    th, td { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
-    th { background: #f3f5f8; }
-    .headline { font-size: 1.4rem; font-weight: 600; }
-  </style>
-</head>
-<body>
-<h1>Legacy</h1><p class="headline">0.71</p>
-</body>
-</html>"""
+def test_legacy_render_uses_the_base_shell():
+    """No layout key -> the default base template: shell + spliced body + runtime.
 
-
-def test_legacy_render_is_byte_identical():
-    """No layout key -> the original base template, unchanged."""
+    The runtime is inlined so a non-tabbed v2 report's bound tables and value
+    filters still work; it is a no-op for a v1 report like this one.
+    """
     definition = {
         "report_name": "Legacy",
         "rendering_spec": {
@@ -247,4 +231,9 @@ def test_legacy_render_is_byte_identical():
         },
     }
     results = {"occ": {"columns": ["rate"], "rows": [{"rate": 0.71}]}}
-    assert render.render_html(definition, results) == _LEGACY_GOLDEN
+    out = render.render_html(definition, results)
+    assert out.startswith("<!DOCTYPE html>")
+    assert "<title>Legacy</title>" in out
+    assert '<h1>Legacy</h1><p class="headline">0.71</p>' in out  # v1 body, verbatim
+    assert "function fillTable" in out  # the runtime is inlined in the default layout
+    assert 'data-tabs' not in out and 'role="tablist"' not in out  # no tabbed furniture

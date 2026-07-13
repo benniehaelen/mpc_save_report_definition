@@ -10,9 +10,26 @@
     th, td { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
     th { background: #f3f5f8; }
     .headline { font-size: 1.4rem; font-weight: 600; }
+    /* Classes the charts_v1.js runtime emits, so v2 features (sign-styled
+       values, staleness banners, charts) render in this default layout too. */
+    .growth { color: #16a34a; font-weight: 600; }
+    .decline { color: #dc2626; font-weight: 600; }
+    .flat { color: #64748b; }
+    .staleness-banner {
+      background: #fff8e1; border: 1px solid #f0d999; border-left: 4px solid #f59e0b;
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;
+      font-size: 0.8rem; color: #7a5b00;
+    }
+    .staleness-banner strong { color: #92400e; }
+    .chart-svg { width: 100%; }
+    .bar-label { font-size: 11px; fill: #64748b; }
+    .bar-value { font-size: 10px; fill: #092240; font-weight: 600; }
+    .axis-line { stroke: #e8edf3; stroke-width: 1; }
+    .grid-line { stroke: #e8edf3; stroke-width: 0.5; stroke-dasharray: 3, 3; }
   </style>
 </head>
 <body>
 {{ body | safe }}
+{% if runtime_js %}<script>{{ runtime_js | safe }}</script>{% endif %}
 </body>
 </html>
