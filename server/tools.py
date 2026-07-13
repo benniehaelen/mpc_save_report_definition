@@ -1,8 +1,10 @@
 """The four MCP tools, implemented as plain functions.
 
-main.py wires these into FastMCP. Every tool takes conversation_id as its first
-parameter; the POC treats it as an opaque session key. The functions get their
-DuckDB connection from server.db so tests can call them in-process.
+main.py wires these into FastMCP and resolves the session key at that boundary
+(explicit conversation_id, else the client's _meta trace id, else generated).
+These functions take the already-resolved key as their first parameter and treat
+it as an opaque session key. The functions get their DuckDB connection from
+server.db so tests can call them in-process.
 """
 
 from __future__ import annotations

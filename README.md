@@ -83,9 +83,11 @@ correlation" below); the arguments that matter are listed first.
   assigns it `result_name`, logs the call, and returns the rows. The `result_name`
   is what makes named results work later.
 - **save_report_definition(report_name, transcript, final_artifact,
-  temporal_confirmations=None)** distills a named query set from the logged calls,
-  runs the parity gate against the final artifact, and registers the definition on
-  pass. Its response carries a `session` block naming the correlation key used.
+  temporal_confirmations=None, structure_confirmations=None)** distills a named
+  query set from the logged calls, runs the parity gate against the final
+  artifact, and registers the definition on pass. Its response carries a `session`
+  block naming the correlation key used. `structure_confirmations` drives the
+  free-form extraction round-trip (below).
 
 ### Session correlation
 
@@ -667,7 +669,11 @@ runner/regenerate.py   CLI replay runner
 runner/render.py       HTML and Markdown rendering shared with the parity gate
 scripts/demo_session.py        scripted v1 capture
 scripts/demo_market_story.py   scripted v2 capture (the Las Vegas report)
+scripts/demo_free_form.py      scripted free-form capture (save-time extraction)
 scripts/market_queries.py      the nine market-share queries; all derivation in SQL
+scripts/preview_artifact.py    render an artifact fragment before saving
+scripts/analyze_meta_probe.py  summarize the _meta probe log (session correlation)
+scripts/servers.ps1            list/stop running hin-poc servers
 templates/report_base.html.j2       base report template
 templates/layouts/tabbed_dashboard.html.j2   the tabbed layout
 templates/themes/market_story_v1.css         theme inlined into the report

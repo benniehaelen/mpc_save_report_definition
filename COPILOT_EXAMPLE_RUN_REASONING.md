@@ -42,7 +42,7 @@ call when prompted:
 ```text
 Using the hin-poc MCP tools, build a re-generatable report focused on narrative, and save it. Do not pass a conversation_id; the session is correlated automatically.
 
-1. Build "admissions by division" for the last 30 days ending at the anchor, executed as `admissions_by_division` (columns: division, admission_count).
+1. Build "admissions by division" for the last 30 days ending at the anchor, executed as `admissions_by_division` (columns: division, admissions).
 2. Build "average census and occupancy rate by facility" for the same window, executed as `census_by_facility` (columns: facility_name, avg_census, occupancy_rate).
 
 Assemble the report as an HTML body fragment following the artifact contract in your instructions:
@@ -52,7 +52,7 @@ Assemble the report as an HTML body fragment following the artifact contract in 
   - "peak_occupancy": over census_by_facility.occupancy_rate, aggregated as max,
   - "low_occupancy": over census_by_facility.occupancy_rate, aggregated as min,
   - "mean_occupancy": over census_by_facility.occupancy_rate, aggregated as avg,
-  - "total_admissions": over admissions_by_division.admission_count, aggregated as total.
+  - "total_admissions": over admissions_by_division.admissions, aggregated as total.
 
 Then save it with save_report_definition: report_name "Facility Occupancy Narrative", a short transcript, and output formats html and md.
 
@@ -74,7 +74,7 @@ time.
 **Message 1 — first query:**
 
 ```text
-Use the hin-poc tools (no conversation_id needed; the session correlates automatically). Build admissions by division for the last 30 days ending at the anchor date (columns division, admission_count). dry_run_sql it, then execute_sql it as "admissions_by_division". Show me the rows.
+Use the hin-poc tools (no conversation_id needed; the session correlates automatically). Build admissions by division for the last 30 days ending at the anchor date (columns division, admissions). dry_run_sql it, then execute_sql it as "admissions_by_division". Show me the rows.
 ```
 
 **Message 2 — second query:**
@@ -90,7 +90,7 @@ Assemble the report as an HTML body fragment per the artifact contract in your i
 - "peak_occupancy" over census_by_facility.occupancy_rate, agg max,
 - "low_occupancy" over census_by_facility.occupancy_rate, agg min,
 - "mean_occupancy" over census_by_facility.occupancy_rate, agg avg,
-- "total_admissions" over admissions_by_division.admission_count, agg total.
+- "total_admissions" over admissions_by_division.admissions, agg total.
 Show me the fragment.
 ```
 

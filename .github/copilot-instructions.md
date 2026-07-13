@@ -26,7 +26,7 @@ user asks you to build, save, or regenerate a report.
 5. Build the report as an **HTML body fragment** following the artifact contract
    below.
 6. Call **`save_report_definition(report_name, transcript, final_artifact,
-   temporal_confirmations=None)`**, where:
+   temporal_confirmations=None, structure_confirmations=None)`**, where:
    - `transcript` is `[{role, content}]`.
    - `final_artifact = {format: "html", title, content, formats: ["html", "md"]}`.
 7. Report back `status`, `parity.passed`, `report_id`, and any `warnings` or
