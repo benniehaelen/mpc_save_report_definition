@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # pytest for the suite; harlequin is a terminal DuckDB browser for poc.duckdb
-# (run `harlequin -r data/poc.duckdb` with the MCP server stopped).
+# (run `harlequin -r data/poc.duckdb` -- read-only, so it coexists with the server).
 dev = ["pytest>=8.0", "harlequin>=1.0"]
 # Optional LLM-backed reasoning engine (opt-in via POC_REASONING=anthropic).
 llm = ["anthropic>=0.69"]

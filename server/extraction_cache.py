@@ -123,8 +123,3 @@ def mark_consumed(con: sqlite3.Connection, token: str, report_id: str) -> None:
         (_now(), report_id, token),
     )
     con.commit()
-
-
-def delete(con: sqlite3.Connection, token: str) -> None:
-    con.execute("DELETE FROM extraction_plans WHERE token = ?", (token,))
-    con.commit()

@@ -40,7 +40,7 @@ Paste this single message into Copilot Chat (Agent mode) and approve each tool
 call when prompted:
 
 ```text
-Using the hin-poc MCP tools, build a re-generatable report focused on narrative, and save it. Use one conversation_id for every call.
+Using the hin-poc MCP tools, build a re-generatable report focused on narrative, and save it. Do not pass a conversation_id; the session is correlated automatically.
 
 1. Build "admissions by division" for the last 30 days ending at the anchor, executed as `admissions_by_division` (columns: division, admission_count).
 2. Build "average census and occupancy rate by facility" for the same window, executed as `census_by_facility` (columns: facility_name, avg_census, occupancy_rate).
@@ -74,7 +74,7 @@ time.
 **Message 1 — first query:**
 
 ```text
-Use the hin-poc tools with a single conversation_id for this whole session. Build admissions by division for the last 30 days ending at the anchor date (columns division, admission_count). dry_run_sql it, then execute_sql it as "admissions_by_division". Show me the rows.
+Use the hin-poc tools (no conversation_id needed; the session correlates automatically). Build admissions by division for the last 30 days ending at the anchor date (columns division, admission_count). dry_run_sql it, then execute_sql it as "admissions_by_division". Show me the rows.
 ```
 
 **Message 2 — second query:**

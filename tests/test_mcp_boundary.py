@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 from fastmcp import Client
 
 from server.main import mcp

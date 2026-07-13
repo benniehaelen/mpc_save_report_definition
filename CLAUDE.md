@@ -91,8 +91,10 @@ boundaries to `DATE_TRUNC` expressions), `parity.py` (the gate — compares
 extracted *data values*, not markup), `knowledge_graph.py` (metrics/ValueSets
 catalog + binding validation), `reasoning.py` (`ReasoningEngine` protocol),
 `registry.py` (definition storage in the SQLite metadata store), `db.py` (both DB
-paths, cached connections, `ANCHOR_DATE`), `observability.py` (OTel-style spans to
-`logs/spans.jsonl`). `runner/render.py` holds the HTML/Markdown renderers shared
+paths, cached connections, `ANCHOR_DATE`), `correlation.py` (resolves the session
+key from an explicit id / the MCP `_meta` trace id / a generated fallback),
+`env.py` (loads a gitignored `.env`; real env vars win), `observability.py`
+(OTel-style spans to `logs/spans.jsonl`). `runner/render.py` holds the HTML/Markdown renderers shared
 by the parity gate and the runner, plus the Jinja filters/globals (`pick`,
 `sign_class`, `editorial_banner`) the v2 templates call.
 

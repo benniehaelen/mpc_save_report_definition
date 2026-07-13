@@ -33,7 +33,7 @@ Paste this single message into Copilot Chat (Agent mode) and approve each tool
 call when prompted:
 
 ```text
-Using the hin-poc MCP tools, build a complete re-generatable report and save it. Use one conversation_id for every call.
+Using the hin-poc MCP tools, build a complete re-generatable report and save it. Do not pass a conversation_id; the session is correlated automatically.
 
 1. Run one throwaway query first named `scratch` (any count) and never reference it, to prove dead ends drop out.
 2. Build "admissions by division" for the last 30 days ending at the anchor, executed as `admissions_by_division`.
@@ -66,7 +66,7 @@ time. This lets you watch each stage.
 **Message 1 — start and explore:**
 
 ```text
-Use the hin-poc tools with a single conversation_id for this whole session. Call nl_query for: "admissions by division, last 30 days". Show me the suggested_sql and the tables and columns it returned. Don't execute anything yet.
+Use the hin-poc tools (no conversation_id needed; the session correlates automatically). Call nl_query for: "admissions by division, last 30 days". Show me the suggested_sql and the tables and columns it returned. Don't execute anything yet.
 ```
 
 **Message 2 — validate and run the first query:**

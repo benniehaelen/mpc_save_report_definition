@@ -145,7 +145,8 @@ above. Start a fresh chat and confirm the four `hin-poc` tools are listed.
 Paste this into the Copilot so it produces a parity-safe artifact (verbatim):
 
 > You have the `hin-poc` MCP tools. To build a re-generatable report:
-> 1. Reuse one `conversation_id` string for every tool call in this session.
+> 1. Do not fabricate or pass a `conversation_id`; the session is correlated
+>    automatically from your client's trace id.
 > 2. Call `nl_query` with the user's question. Read `suggested_sql` and the
 >    returned table and column lists.
 > 3. Refine the SQL, then `dry_run_sql` it. Fix any error and dry-run again.
@@ -642,20 +643,26 @@ condition (`gap_now < 800`) is true at 662 and false at 865.
 
 ```
 data/seed.py           creates and populates poc.duckdb (data + knowledge graph)
-server/main.py         FastMCP entry point
+server/main.py         FastMCP entry point; resolves the session key at the boundary
+server/correlation.py  session key from an explicit id / the MCP _meta trace id / generated
 server/tools.py        the four MCP tools
 server/intent_catalog.py   keyword intents for nl_query
-server/call_log.py     tool-call log keyed by conversation_id
-server/artifact.py     v2 artifact parser: islands, value grammar, source offsets
+server/call_log.py     tool-call log keyed by the session key, with result fingerprints
+server/artifact.py     v2 artifact parser: islands, value grammar, source offsets; detect_mode
 server/compiler.py     distillation: session record -> four-part definition
+server/fingerprint.py  matches a free-form page's numbers to logged results (WS11)
+server/extractor.py    StructureExtractor protocol + validate_plan (WS11)
+server/normalizer.py   rewrites a free-form artifact into the v2 contract (WS11)
+server/extraction_cache.py  extraction plans awaiting confirmation
 server/linter.py       rejects author-written templating; warns on frozen labels
 server/temporal.py     date literal detection and re-parameterization
 server/knowledge_graph.py  metric/ValueSet catalog and binding validation
 server/reasoning.py    ReasoningEngine protocol and deterministic engine
+server/env.py          loads a gitignored .env; real env vars win
 server/observability.py    local OTel-style spans to logs/spans.jsonl
 server/parity.py       the parity gate
-server/registry.py     definition registry (DuckDB tables)
-server/db.py           shared DB path, connection, and constants
+server/registry.py     definition registry (SQLite metadata store)
+server/db.py           shared DB paths, connections, and constants
 runner/regenerate.py   CLI replay runner
 runner/render.py       HTML and Markdown rendering shared with the parity gate
 scripts/demo_session.py        scripted v1 capture

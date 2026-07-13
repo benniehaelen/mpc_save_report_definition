@@ -7,8 +7,6 @@ these tests run it through the real `artifact.detect_mode`, `artifact.parse`, an
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from bs4 import BeautifulSoup
 

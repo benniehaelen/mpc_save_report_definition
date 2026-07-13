@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 from runner import regenerate, render
-from server import call_log, compiler, parity
+from server import compiler, parity
 from server.db import ANCHOR_DATE, get_connection
 from server.observability import RunRecorder
 

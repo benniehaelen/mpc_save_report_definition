@@ -63,7 +63,6 @@ class SessionContext:
     con: object = None  # read-only DuckDB warehouse
     meta: object = None  # SQLite metadata store
     catalog: dict = field(default_factory=dict)
-    prior_diff: str | None = None  # parity diff from a failed attempt
 
 
 class StructureExtractor(Protocol):
@@ -307,11 +306,6 @@ class AnthropicExtractor:
             f"\nPROSE BLOCKS:\n{blocks}",
             f"\nLOGGED QUERIES:\n{queries}",
         ]
-        if session.prior_diff:
-            parts.append(
-                f"\nA PREVIOUS ATTEMPT FAILED THE PARITY GATE:\n{session.prior_diff}\n"
-                "Adjust the plan so the rendered values match the page."
-            )
         return "\n".join(parts)
 
     def _merge(self, base: dict, proposed: dict) -> dict:
