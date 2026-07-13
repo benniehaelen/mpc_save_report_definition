@@ -533,6 +533,10 @@ def save_report_definition(
         "report_id": report_id,
         "definition_version": version,
         "parity": parity_block,
+        # The stored, temporally parameterized SQL, so a client can report it
+        # without fetching or introspecting the definition.
+        "parameterized_sql": definition.get("parameterized_sql", []),
+        "reasoning_steps": definition.get("reasoning_steps", []),
         "warnings": definition.get("warnings", []),
         "unreplayable_sections": definition.get("unreplayable_sections", []),
     }

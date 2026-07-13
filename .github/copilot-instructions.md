@@ -8,6 +8,18 @@ once; the runner then replays it automatically.
 When the `hin-poc` MCP server is connected, follow the workflow below whenever the
 user asks you to build, save, or regenerate a report.
 
+**Do only what the current message asks.** The steps below are the shape of a
+whole session, not a checklist to finish in one turn. If a message asks only to
+see the suggested SQL, run one query, or show rows, stop there and show it — do
+**not** run ahead to build the artifact or call `save_report_definition` until the
+user asks. Users often drive this one step per message.
+
+**Never introspect the database or write helper scripts to answer a question.**
+Everything you need to report — the stored SQL, the reasoning steps, parity, the
+report id — is returned by the tools themselves (see step 7). Do not open
+`poc_meta.sqlite`, call `registry.get`, or run Python to fetch a definition; read
+the tool's response.
+
 ## The build loop
 
 1. **Do not fabricate or pass a `conversation_id`.** The session is correlated
@@ -30,10 +42,16 @@ user asks you to build, save, or regenerate a report.
    - `transcript` is `[{role, content}]`.
    - `final_artifact = {format: "html", title, content, formats: ["html", "md"]}`.
 7. Report back `status`, `parity.passed`, `report_id`, and any `warnings` or
-   `unreplayable_sections`. The response's `session` block shows the correlation
-   key, its `source`, and how many queries were found under it. A `no_logged_calls`
-   status means the session lost correlation (usually a reloaded chat) — re-run the
-   `execute_sql` calls in this chat and save again.
+   `unreplayable_sections`. The `registered` response also carries everything else
+   a user commonly asks to see, so report it straight from the response — never
+   fetch the definition to get it:
+   - `parameterized_sql` — the stored, temporally parameterized SQL (each date
+     literal rewritten to a `__REPORT_DATE__` offset). This *is* "the stored SQL".
+   - `reasoning_steps` — the goal-directed steps saved in the definition.
+   - the `session` block — the correlation key, its `source`, and how many queries
+     were found under it. A `no_logged_calls` status means the session lost
+     correlation (usually a reloaded chat); re-run the `execute_sql` calls in this
+     chat and save again.
 
 If parity fails, the response names the first differing table or value. The usual
 cause is cell text that does not match the query output — see the contract.
