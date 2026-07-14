@@ -5,6 +5,16 @@ Run: python data/seed.py
 Produces data/poc.duckdb with 120 days of healthcare-flavored data ending on the
 fixed anchor date of 2025-06-30, and resets data/poc_meta.sqlite -- the metadata
 store holding the empty platform tables the server writes.
+
+The `main` schema holds the report world (facilities, admissions, daily_census,
+marketshare_volume, plus the knowledge-graph catalog). Three further schemas hold
+the HCA clinical tables translated from the BigQuery DDL in query.sql --
+`clinical_core_silver.encounter`, `pub_facility_master_silver.facility_master_sites_silver`,
+and the `enterprise_ontology_gold.facility_master_site` view -- seeded so
+`data/queries/tn_monthly_encounters.sql` returns monthly TN encounter counts. A
+curated `main.encounters` view sits on top of those, presenting one clean row per
+current encounter so non-experts can query it in plain English.
+
 The script is idempotent: it drops and recreates everything on each run.
 
 This is the only place that opens poc.duckdb read-write, and it takes an
@@ -433,6 +443,338 @@ def _build_rows(rng: random.Random):
     return facilities, admissions, census
 
 
+# ---------------------------------------------------------------------------
+# The HCA clinical world (translated from the BigQuery DDL in
+# c:\Users\benni\Downloads\query.sql). Three objects that the "monthly TN
+# encounters" query joins:
+#   clinical_core_silver.encounter                     (fact-ish clinical table)
+#   pub_facility_master_silver.facility_master_sites_silver  (facility master)
+#   enterprise_ontology_gold.facility_master_site      (view, adds timezone cols)
+#
+# BigQuery -> DuckDB: three-part project.dataset.table names lose the project
+# prefix (DuckDB has one catalog per file); each dataset becomes a schema.
+# STRING->VARCHAR, INT64->BIGINT, NUMERIC->DECIMAL(38,9), DATETIME/TIMESTAMP->
+# TIMESTAMP. OPTIONS/CLUSTER BY/PARTITION BY are dropped. `admission_date_time`
+# stays VARCHAR (STRING in the source; the query SAFE_CASTs it).
+# ---------------------------------------------------------------------------
+
+# TN hospitals that pass the query filter (state_code='TN', site_type LIKE
+# 'HOSPITAL%'). Their coids are what the encounter counts are grouped from.
+_TN_HOSPITALS = [
+    "Nashville General", "Memphis Methodist", "Knoxville Regional",
+    "Chattanooga Erlanger", "Franklin Williamson", "Murfreesboro Saint Thomas",
+    "Clarksville Tennova", "Jackson Madison", "Johnson City Medical",
+    "Kingsport Holston", "Cookeville Regional", "Hendersonville Sumner",
+    "Brentwood TriStar", "Smyrna Stonecrest", "Columbia Maury",
+]
+# Decoys, so the query's WHERE actually filters: non-TN hospitals, and TN sites
+# that are not hospitals. None of these should appear in the counts.
+_DECOY_SITES = [
+    ("Orlando Health", "FL", "Hospital - General"),
+    ("Dallas Presbyterian", "TX", "Hospital - General"),
+    ("Denver Mercy", "CO", "Hospital - General"),
+    ("Nashville Family Clinic", "TN", "Clinic"),
+    ("Memphis Surgery Center", "TN", "Ambulatory Surgery Center"),
+    ("Knoxville Imaging", "TN", "Imaging Center"),
+]
+
+_HCA_WINDOW_START = (2023, 6)   # DATE_TRUNC(anchor - 24 months, MONTH) = 2023-06-01
+_HCA_WINDOW_END = (2025, 6)     # up to the anchor month; 25 months inclusive
+_ENCOUNTERS_PER_SITE_MONTH = 30
+
+
+def _create_hca_clinical(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the three HCA clinical objects, faithful to the BigQuery DDL."""
+    con.execute("DROP VIEW IF EXISTS encounters")
+    con.execute("DROP VIEW IF EXISTS enterprise_ontology_gold.facility_master_site")
+    con.execute("DROP TABLE IF EXISTS pub_facility_master_silver.facility_master_sites_silver")
+    con.execute("DROP TABLE IF EXISTS clinical_core_silver.encounter")
+    for schema in (
+        "clinical_core_silver",
+        "pub_facility_master_silver",
+        "enterprise_ontology_gold",
+    ):
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+
+    con.execute(
+        """
+        CREATE TABLE pub_facility_master_silver.facility_master_sites_silver (
+          company_code                 VARCHAR NOT NULL,
+          coid                         VARCHAR NOT NULL,
+          parent_site_code             VARCHAR NOT NULL,
+          site_code                    VARCHAR NOT NULL,
+          site_type                    VARCHAR,
+          site_operating_status        VARCHAR,
+          site_name                    VARCHAR,
+          site_short_name              VARCHAR,
+          street_address_1             VARCHAR,
+          street_address_2             VARCHAR,
+          city                         VARCHAR,
+          county                       VARCHAR,
+          state_code                   VARCHAR,
+          postal_code                  VARCHAR,
+          country_code                 VARCHAR,
+          latitude                     DECIMAL(38, 9),
+          longitude                    DECIMAL(38, 9),
+          site_timezone                VARCHAR,
+          effective_date_time          TIMESTAMP NOT NULL,
+          source_system_ref_code       VARCHAR NOT NULL,
+          bronze_ingest_date_time      TIMESTAMP NOT NULL,
+          silver_ingest_date_time      TIMESTAMP NOT NULL,
+          silver_last_update_date_time TIMESTAMP NOT NULL
+        )
+        """
+    )
+
+    con.execute(
+        """
+        CREATE TABLE clinical_core_silver.encounter (
+          company_code                       VARCHAR NOT NULL,
+          network_mnemonic                   VARCHAR NOT NULL,
+          facility_mnemonic                  VARCHAR NOT NULL,
+          coid                               VARCHAR NOT NULL,
+          patient_account_num                VARCHAR NOT NULL,
+          pa_patient_account_num             VARCHAR,
+          medical_record_num                 VARCHAR,
+          medical_record_urn                 VARCHAR,
+          admission_date_time                VARCHAR,
+          admission_date_time_utc            VARCHAR,
+          discharge_date_time                VARCHAR,
+          discharge_date_time_utc            VARCHAR,
+          reason_for_visit                   VARCHAR,
+          patient_class_code                 VARCHAR,
+          patient_class_desc                 VARCHAR,
+          patient_type_code                  VARCHAR,
+          patient_type_desc                  VARCHAR,
+          admit_source_code                  VARCHAR,
+          admit_source_desc                  VARCHAR,
+          mode_of_arrival_code               VARCHAR,
+          mode_of_arrival_code_desc          VARCHAR,
+          admission_type_code                VARCHAR,
+          admission_type_desc                VARCHAR,
+          discharge_disposition_code         VARCHAR,
+          confidentiality_code               VARCHAR,
+          confidentiality_desc               VARCHAR,
+          hospital_service_code              VARCHAR,
+          hospital_service_desc              VARCHAR,
+          inpatient_length_of_stay_day_count VARCHAR,
+          patient_birth_date                 VARCHAR,
+          deceased_date_time                 VARCHAR,
+          deceased_date_time_utc             VARCHAR,
+          patient_deceased_ind               VARCHAR,
+          patient_status_code                VARCHAR,
+          emr_patient_id                     VARCHAR,
+          emr_patient_id_domain              VARCHAR,
+          financial_class_code               VARCHAR,
+          financial_class_desc               VARCHAR,
+          accommodation_code                 VARCHAR,
+          alternate_encounter_id             VARCHAR,
+          mother_patient_account_num         VARCHAR,
+          message_type_event_code            VARCHAR,
+          source_event_code                  VARCHAR,
+          modified_event_code                VARCHAR,
+          event_occurred_date_time           TIMESTAMP,
+          event_occurred_date_time_utc       TIMESTAMP,
+          event_recorded_date_time           TIMESTAMP,
+          event_recorded_date_time_utc       TIMESTAMP,
+          location_unit_code                 VARCHAR,
+          location_room_code                 VARCHAR,
+          location_bed_code                  VARCHAR,
+          event_user_id                      VARCHAR,
+          prior_location_unit_code           VARCHAR,
+          prior_location_room_code           VARCHAR,
+          prior_location_bed_code            VARCHAR,
+          prior_patient_account_num          VARCHAR,
+          prior_medical_record_num           VARCHAR,
+          prior_medical_record_urn           VARCHAR,
+          latest_record_ind                  BIGINT NOT NULL,
+          message_control_id                 VARCHAR NOT NULL,
+          message_date_time                  TIMESTAMP NOT NULL,
+          source_system_ref_code             VARCHAR NOT NULL,
+          bronze_ingest_date_time            TIMESTAMP NOT NULL,
+          silver_ingest_date_time            TIMESTAMP NOT NULL,
+          silver_last_update_date_time       TIMESTAMP NOT NULL
+        )
+        """
+    )
+
+    # The gold view: passes the silver columns through and derives the IANA zone
+    # and UTC offsets from site_timezone. Verbatim translation of the BQ CASE.
+    con.execute(
+        """
+        CREATE VIEW enterprise_ontology_gold.facility_master_site AS
+        SELECT
+          company_code, coid, parent_site_code, site_code, site_type,
+          site_operating_status, site_name, site_short_name, street_address_1,
+          street_address_2, city, county, state_code, postal_code, country_code,
+          latitude, longitude,
+          site_timezone AS time_zone_code,
+          CAST(CASE TRIM(UPPER(site_timezone))
+            WHEN 'GMT'  THEN 'Europe/London'
+            WHEN 'EST'  THEN 'America/New_York'
+            WHEN 'CST'  THEN 'America/Chicago'
+            WHEN 'PST'  THEN 'America/Los_Angeles'
+            WHEN 'MST'  THEN 'America/Denver'
+            WHEN 'AKST' THEN 'America/Anchorage'
+            ELSE NULL END AS VARCHAR) AS time_zone_iana,
+          CAST(CASE TRIM(UPPER(site_timezone))
+            WHEN 'GMT'  THEN '+00:00' WHEN 'EST' THEN '-05:00'
+            WHEN 'CST'  THEN '-06:00' WHEN 'MST' THEN '-07:00'
+            WHEN 'PST'  THEN '-08:00' WHEN 'AKST' THEN '-09:00'
+            ELSE NULL END AS VARCHAR) AS time_zone_standard_time_utc_offset,
+          CAST(CASE TRIM(UPPER(site_timezone))
+            WHEN 'GMT'  THEN '+00:00' WHEN 'EST' THEN '-04:00'
+            WHEN 'CST'  THEN '-05:00' WHEN 'MST' THEN '-06:00'
+            WHEN 'PST'  THEN '-07:00' WHEN 'AKST' THEN '-08:00'
+            ELSE NULL END AS VARCHAR) AS time_zone_daylight_time_utc_offset,
+          effective_date_time, source_system_ref_code
+        FROM pub_facility_master_silver.facility_master_sites_silver
+        """
+    )
+
+    # A curated analytics view in `main`, so non-experts can query encounters in
+    # plain English without knowing the clinical schemas. It hides everything a
+    # beginner should not have to know: the cross-schema join to the facility
+    # master, the text->timestamp cast on admission_date_time, the
+    # latest_record_ind current-version filter, and the non-null account guard.
+    # One clean row per current encounter, with a real DATE and the facility's
+    # name/state/type/timezone attached. Because it lives in `main`, nl_query
+    # surfaces it like any other table.
+    con.execute(
+        """
+        CREATE VIEW encounters AS
+        SELECT
+          CAST(TRY_CAST(e.admission_date_time AS TIMESTAMP) AS DATE) AS encounter_date,
+          f.site_name      AS facility,
+          f.state_code     AS state,
+          f.site_type      AS facility_type,
+          f.time_zone_iana AS time_zone,
+          e.coid,
+          e.patient_account_num AS encounter_id
+        FROM clinical_core_silver.encounter e
+        JOIN enterprise_ontology_gold.facility_master_site f ON e.coid = f.coid
+        WHERE e.latest_record_ind = 1
+          AND e.patient_account_num IS NOT NULL
+          AND TRY_CAST(e.admission_date_time AS TIMESTAMP) IS NOT NULL
+        """
+    )
+
+
+def _iter_months(start: tuple[int, int], end: tuple[int, int]):
+    year, month = start
+    while (year, month) <= end:
+        yield year, month
+        month += 1
+        if month == 13:
+            month, year = 1, year + 1
+
+
+# The columns we populate. The tables carry the full DDL schema; the rest of the
+# columns are left NULL. All NOT NULL columns are included here.
+_FACILITY_COLUMNS = [
+    "company_code", "coid", "parent_site_code", "site_code", "site_type",
+    "site_operating_status", "site_name", "city", "state_code", "postal_code",
+    "country_code", "site_timezone", "effective_date_time", "source_system_ref_code",
+    "bronze_ingest_date_time", "silver_ingest_date_time", "silver_last_update_date_time",
+]
+_ENCOUNTER_COLUMNS = [
+    "company_code", "network_mnemonic", "facility_mnemonic", "coid",
+    "patient_account_num", "admission_date_time", "patient_class_code",
+    "patient_class_desc", "admission_type_code", "latest_record_ind",
+    "message_control_id", "message_date_time", "source_system_ref_code",
+    "bronze_ingest_date_time", "silver_ingest_date_time", "silver_last_update_date_time",
+]
+
+
+def _build_hca_rows(rng: random.Random):
+    """Facilities and encounters for the TN monthly-encounters query.
+
+    Returns (facility_rows, encounter_rows) as tuples in _FACILITY_COLUMNS /
+    _ENCOUNTER_COLUMNS order. TN hospitals get real monthly encounter volume;
+    decoy sites, superseded (latest_record_ind=0) rows, and a few unparseable
+    admission timestamps exist only so the query's filters have something to do.
+    """
+    ingest = dt.datetime(2025, 6, 30, 3, 0, 0)
+    effective = dt.datetime(2020, 1, 1, 0, 0, 0)
+
+    facilities = []
+    tn_coids = []
+    for i, name in enumerate(_TN_HOSPITALS):
+        coid = f"130{i + 1:02d}"
+        tn_coids.append((coid, name))
+        facilities.append({
+            "company_code": "H01", "coid": coid, "parent_site_code": f"S13{i + 1:05d}",
+            "site_code": f"S13{i + 1:05d}", "site_type": "Hospital - General",
+            "site_operating_status": "Open", "site_name": name,
+            "city": name.split()[0], "state_code": "TN", "postal_code": f"37{i:03d}",
+            "country_code": "US", "site_timezone": "CST" if i % 3 else "EST",
+            "effective_date_time": effective, "source_system_ref_code": "RDM",
+            "bronze_ingest_date_time": ingest, "silver_ingest_date_time": ingest,
+            "silver_last_update_date_time": ingest,
+        })
+    decoy_coids = []
+    for j, (name, state, site_type) in enumerate(_DECOY_SITES):
+        coid = f"140{j + 1:02d}"
+        decoy_coids.append(coid)
+        facilities.append({
+            "company_code": "H01", "coid": coid, "parent_site_code": f"S14{j + 1:05d}",
+            "site_code": f"S14{j + 1:05d}", "site_type": site_type,
+            "site_operating_status": "Open", "site_name": name,
+            "city": name.split()[0], "state_code": state, "postal_code": f"9{j:04d}",
+            "country_code": "US", "site_timezone": "CST",
+            "effective_date_time": effective, "source_system_ref_code": "RDM",
+            "bronze_ingest_date_time": ingest, "silver_ingest_date_time": ingest,
+            "silver_last_update_date_time": ingest,
+        })
+
+    encounters = []
+    account = 0
+
+    def _encounter(coid, admit_str, latest):
+        nonlocal account
+        account += 1
+        return {
+            "company_code": "HCA", "network_mnemonic": "TN",
+            "facility_mnemonic": f"F{coid}", "coid": coid,
+            "patient_account_num": f"PA{account:09d}", "admission_date_time": admit_str,
+            "patient_class_code": rng.choice(["I", "O", "E"]),
+            "patient_class_desc": "Inpatient",
+            "admission_type_code": rng.choice(["1", "2", "3"]),
+            "latest_record_ind": latest, "message_control_id": f"MSG{account:09d}",
+            "message_date_time": ingest, "source_system_ref_code": "MEDITECH 5.6",
+            "bronze_ingest_date_time": ingest, "silver_ingest_date_time": ingest,
+            "silver_last_update_date_time": ingest,
+        }
+
+    for year, month in _iter_months(_HCA_WINDOW_START, _HCA_WINDOW_END):
+        days_in_month = (dt.date(year + (month // 12), (month % 12) + 1, 1)
+                         - dt.timedelta(days=1)).day
+        for coid, _name in tn_coids:
+            count = _ENCOUNTERS_PER_SITE_MONTH + rng.randint(-8, 8)
+            for _ in range(count):
+                day = rng.randint(1, days_in_month)
+                admit = f"{year:04d}-{month:02d}-{day:02d}T{rng.randint(0,23):02d}:{rng.randint(0,59):02d}:00"
+                encounters.append(_encounter(coid, admit, 1))
+            # A few superseded rows -- filtered out by latest_record_ind = 1.
+            for _ in range(rng.randint(1, 3)):
+                admit = f"{year:04d}-{month:02d}-15T09:00:00"
+                encounters.append(_encounter(coid, admit, 0))
+        # Decoy-coid encounters -- filtered out by the TN-hospital coid list.
+        for _ in range(len(decoy_coids)):
+            coid = rng.choice(decoy_coids)
+            admit = f"{year:04d}-{month:02d}-10T12:00:00"
+            encounters.append(_encounter(coid, admit, 1))
+        # A couple of unparseable admission timestamps -- SAFE_CAST -> NULL,
+        # filtered out by the IS NOT NULL guard.
+        for _ in range(2):
+            coid = rng.choice([c for c, _ in tn_coids])
+            encounters.append(_encounter(coid, "UNKNOWN", 1))
+
+    fac_rows = [tuple(f.get(c) for c in _FACILITY_COLUMNS) for f in facilities]
+    enc_rows = [tuple(e.get(c) for c in _ENCOUNTER_COLUMNS) for e in encounters]
+    return fac_rows, enc_rows
+
+
 def main() -> None:
     rng = random.Random()
     rng.seed(42)
@@ -467,6 +809,23 @@ def main() -> None:
             "INSERT INTO dimension_value_sets VALUES (?, ?)", dimension_value_sets
         )
 
+        # The HCA clinical tables (own random stream, so it never shifts the data
+        # seeded above).
+        _create_hca_clinical(con)
+        hca_facilities, hca_encounters = _build_hca_rows(random.Random(42))
+        con.executemany(
+            "INSERT INTO pub_facility_master_silver.facility_master_sites_silver "
+            f"({', '.join(_FACILITY_COLUMNS)}) "
+            f"VALUES ({', '.join('?' * len(_FACILITY_COLUMNS))})",
+            hca_facilities,
+        )
+        con.executemany(
+            "INSERT INTO clinical_core_silver.encounter "
+            f"({', '.join(_ENCOUNTER_COLUMNS)}) "
+            f"VALUES ({', '.join('?' * len(_ENCOUNTER_COLUMNS))})",
+            hca_encounters,
+        )
+
         print(f"Seeded {DB_PATH}")
         print(f"  facilities:   {len(facilities)}")
         print(f"  admissions:   {len(admissions)}")
@@ -475,6 +834,12 @@ def main() -> None:
               f"({quarter_date(0)} .. {quarter_date(NUM_QUARTERS - 1)})")
         print(f"  metrics:      {len(metrics)}")
         print(f"  value_sets:   {len(value_sets)} memberships")
+        print(f"  hca facilities: {len(hca_facilities)} "
+              f"({len(_TN_HOSPITALS)} TN hospitals + {len(_DECOY_SITES)} decoys)")
+        print(f"  hca encounters: {len(hca_encounters)} rows across "
+              f"{_HCA_WINDOW_START[0]}-{_HCA_WINDOW_START[1]:02d} .. "
+              f"{_HCA_WINDOW_END[0]}-{_HCA_WINDOW_END[1]:02d}")
+        print("  encounters view: main.encounters (curated, plain-English-friendly)")
         print(f"  anchor date:  {ANCHOR_DATE.isoformat()}")
         print("  metadata:     reset data/poc_meta.sqlite (log + registry)")
         _print_marketshare_story(con)
